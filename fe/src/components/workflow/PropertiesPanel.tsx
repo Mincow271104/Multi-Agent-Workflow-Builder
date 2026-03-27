@@ -9,7 +9,7 @@ const PROVIDERS: { value: ProviderName; label: string }[] = [
 ];
 
 const MODELS: Record<ProviderName, string[]> = {
-  ollama: ['phi3:mini', 'phi3', 'llama3', 'llama3:8b', 'mistral', 'gemma2', 'codellama'],
+  ollama: ['llama3.2', 'llama3.1', 'phi3:mini', 'llama3', 'mistral', 'gemma2'],
   groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'],
   gemini: ['gemini-pro', 'gemini-1.5-pro', 'gemini-1.5-flash'],
 };
