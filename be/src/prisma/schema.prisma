@@ -1,0 +1,134 @@
+// ===================================================================
+// Prisma Schema — Multi-Agent Workflow Builder
+// ===================================================================
+// Provider : MySQL
+// Models   : User, Workflow, Agent, Execution
+// ===================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────
+
+/// Supported AI providers for agents.
+enum AIProvider {
+  OLLAMA
+  GROQ
+  GEMINI
+}
+
+/// Possible statuses for a workflow.
+enum WorkflowStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+/// Possible statuses for a single execution run.
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+/// User roles for access control.
+enum UserRole {
+  ADMIN
+  USER
+}
+
+// ─── Models ───────────────────────────────────────────────────────
+
+/// Application user — owns Workflows.
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  password  String   /// bcrypt-hashed password
+  role      UserRole @default(USER)
+
+  // ── Relations ─────────────────────────────────────────────────
+  workflows Workflow[]
+
+  // ── Timestamps ────────────────────────────────────────────────
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+/// A workflow defines a sequence / graph of AI agents.
+model Workflow {
+  id          String         @id @default(uuid())
+  name        String
+  description String?        @db.Text
+  config      Json?          /// Arbitrary JSON config (node positions, edges, etc.)
+  status      WorkflowStatus @default(DRAFT)
+
+  // ── Relations ─────────────────────────────────────────────────
+  userId     String
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agents     Agent[]
+  executions Execution[]
+
+  // ── Timestamps ────────────────────────────────────────────────
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("workflows")
+}
+
+/// An AI agent node inside a workflow.
+model Agent {
+  id           String     @id @default(uuid())
+  name         String
+  provider     AIProvider /// Which AI backend to use
+  model        String     /// Model identifier (e.g. "llama3", "gemma2", "gemini-pro")
+  systemPrompt String?    @db.Text /// Optional system prompt for the agent
+  config       Json?      /// Provider-specific config (temperature, maxTokens, etc.)
+  order        Int        @default(0) /// Execution order within the workflow
+
+  // ── Relations ─────────────────────────────────────────────────
+  workflowId String
+  workflow   Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  // ── Timestamps ────────────────────────────────────────────────
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([workflowId])
+  @@map("agents")
+}
+
+/// A single execution run of a workflow.
+model Execution {
+  id     String          @id @default(uuid())
+  status ExecutionStatus @default(PENDING)
+  input  Json?           /// Input data supplied to the workflow
+  result Json?           /// Final result / output of the execution
+  logs   Json?           /// Step-by-step logs from each agent
+
+  // ── Relations ─────────────────────────────────────────────────
+  workflowId String
+  workflow   Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  // ── Timestamps ────────────────────────────────────────────────
+  startedAt   DateTime? /// When execution actually started processing
+  completedAt DateTime? /// When execution finished (success or failure)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([workflowId])
+  @@index([status])
+  @@map("executions")
+}
