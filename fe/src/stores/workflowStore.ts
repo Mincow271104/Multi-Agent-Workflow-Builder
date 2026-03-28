@@ -57,6 +57,7 @@ interface WorkflowState {
   resetExecution: () => void;
   setShowExecution: (show: boolean) => void;
   setActiveTab: (tab: 'logs' | 'result') => void;
+  resetWorkflow: () => void;
 }
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
@@ -236,4 +237,22 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   setShowExecution: (show) => set({ showExecution: show }),
   setActiveTab: (tab) => set({ activeTab: tab }),
+
+  resetWorkflow: () =>
+    set({
+      nodes: [],
+      edges: [],
+      selectedNodeId: null,
+      isRunning: false,
+      executionId: null,
+      agentOutputs: {},
+      executionSteps: [],
+      executionLogs: [],
+      executionError: null,
+      showExecution: false,
+      activeTab: 'logs',
+      currentAgentId: null,
+      finalResult: '',
+      executionStartTime: null,
+    }),
 }));

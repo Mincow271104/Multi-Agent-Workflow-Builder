@@ -1,4 +1,5 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useEffect } from 'react';
+import { useParams } from 'react-router-dom';
 import {
   ReactFlow,
   Background,
@@ -18,8 +19,17 @@ const nodeTypes = { agentNode: AgentNode };
 
 export default function WorkflowCanvas() {
   const { nodes, edges, onNodesChange, onEdgesChange, onConnect, addNode, setSelectedNode } = useWorkflowStore();
+  const resetWorkflow = useWorkflowStore((s) => s.resetWorkflow);
   const rfWrapper = useRef<HTMLDivElement>(null);
   const rfInstanceRef = useRef<{ screenToFlowPosition: (pos: {x: number; y: number}) => {x: number; y: number} } | null>(null);
+  const { id } = useParams<{ id: string }>();
+
+  // Clear workflow state entirely when unmounting or switching to another workflow
+  useEffect(() => {
+    return () => {
+      resetWorkflow();
+    };
+  }, [id, resetWorkflow]);
 
   // Handle drop from sidebar
   const onDragOver = useCallback((e: React.DragEvent) => {

@@ -1,7 +1,9 @@
-import { Save, Play, Plus, LogOut, Loader2, ChevronDown } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Save, Play, Plus, LogOut, Loader2, ChevronDown, Square } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { useNavigate } from 'react-router-dom';
+import { getSocket } from '@/lib/socket';
 
 interface TopBarProps {
   workflowName: string;
@@ -12,8 +14,21 @@ interface TopBarProps {
 
 export default function TopBar({ workflowName, onSave, onRun, isSaving }: TopBarProps) {
   const { user, logout } = useAuthStore();
-  const { isRunning } = useWorkflowStore();
+  const { isRunning, executionId } = useWorkflowStore();
+  const [isStopping, setIsStopping] = useState(false);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!isRunning) setIsStopping(false);
+  }, [isRunning]);
+
+  const handleStop = () => {
+    setIsStopping(true);
+    const socket = getSocket();
+    if (socket && executionId) {
+      socket.emit('stopExecution', { executionId });
+    }
+  };
 
   return (
     <div className="flex h-14 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-4">
@@ -49,14 +64,24 @@ export default function TopBar({ workflowName, onSave, onRun, isSaving }: TopBar
           Save
         </button>
 
-        <button
-          onClick={onRun}
-          disabled={isRunning}
-          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-4 py-1.5 text-xs font-semibold text-white shadow-lg shadow-[var(--color-accent)]/20 hover:bg-[var(--color-accent-hover)] transition disabled:opacity-50"
-        >
-          {isRunning ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-          {isRunning ? 'Running...' : 'Run Workflow'}
-        </button>
+        {isRunning ? (
+          <button
+            onClick={handleStop}
+            disabled={isStopping}
+            className="flex items-center gap-1.5 rounded-lg bg-[var(--color-error)] px-4 py-1.5 text-xs font-semibold text-white shadow-lg shadow-[var(--color-error)]/20 hover:bg-[var(--color-error)]/80 transition disabled:opacity-50"
+          >
+            {isStopping ? <Loader2 size={14} className="animate-spin" /> : <Square fill="currentColor" size={12} />}
+            {isStopping ? 'Stopping...' : 'Stop Workflow'}
+          </button>
+        ) : (
+          <button
+            onClick={onRun}
+            className="flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-4 py-1.5 text-xs font-semibold text-white shadow-lg shadow-[var(--color-accent)]/20 hover:bg-[var(--color-accent-hover)] transition"
+          >
+            <Play size={14} />
+            Run Workflow
+          </button>
+        )}
       </div>
 
       {/* Right — User */}

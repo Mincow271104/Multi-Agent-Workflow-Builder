@@ -41,13 +41,6 @@ function AgentNodeComponent({ id, data, selected }: NodeProps<AgentNodeType>) {
             {data.label}
           </span>
         </div>
-        <button
-          onClick={(e) => { e.stopPropagation(); deleteNode(id); }}
-          className="rounded p-0.5 text-[var(--color-text-muted)] opacity-0 transition-opacity hover:text-[var(--color-error)] group-hover:opacity-100"
-          style={{ opacity: selected ? 1 : undefined }}
-        >
-          <Trash2 size={12} />
-        </button>
       </div>
 
       {/* Provider badge */}

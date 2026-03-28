@@ -59,43 +59,31 @@ export default function WorkflowPage() {
     socket.emit('joinWorkflow', { workflowId: id });
 
     // Agent lifecycle events (emitted by orchestrator)
-    socket.on('agent:output', (data) => {
+    socket.on('agentStarted', (data) => {
+      console.log('[Exec] Agent started:', data.agentName);
+      onAgentStarted({
+        nodeId: data.nodeId || data.agentId || `agent_${Date.now()}`,
+        agentName: data.agentName || data.name || 'Agent',
+        role: data.role || 'agent',
+        provider: data.provider || 'ollama',
+        model: data.model || 'unknown',
+      });
+    });
+
+    socket.on('agentStream', (data) => {
       const nodeId = data.nodeId || data.agentId || '';
-      
-      switch (data.status) {
-        case 'running':
-          console.log('[Exec] Agent started:', data.agentName);
-          onAgentStarted({
-            nodeId,
-            agentName: data.agentName || data.name || 'Agent',
-            role: data.role || 'agent',
-            provider: data.provider || 'ollama',
-            model: data.model || 'unknown',
-          });
-          break;
-          
-        case 'streaming':
-          if (data.chunk) {
-            onAgentStream(nodeId, data.chunk);
-          }
-          break;
-          
-        case 'completed':
-          console.log('[Exec] Agent finished:', data.agentName);
-          onAgentFinished({
-            nodeId,
-            agentName: data.agentName || data.name || 'Agent',
-            role: data.role || 'agent',
-            output: data.output || data.fullOutput || '',
-            durationMs: data.durationMs || 0,
-          });
-          break;
-          
-        case 'failed':
-          console.error(`[Exec] Agent ${data.agentName} failed:`, data.error);
-          showToast(`Agent failed: ${data.error}`, 'error');
-          break;
-      }
+      onAgentStream(nodeId, data.chunk || data.content || '');
+    });
+
+    socket.on('agentFinished', (data) => {
+      console.log('[Exec] Agent finished:', data.agentName);
+      onAgentFinished({
+        nodeId: data.nodeId || data.agentId || '',
+        agentName: data.agentName || data.name || 'Agent',
+        role: data.role || 'agent',
+        output: data.output || data.fullOutput || '',
+        durationMs: data.durationMs || 0,
+      });
     });
 
     // Execution workflow wrapper events
@@ -121,7 +109,9 @@ export default function WorkflowPage() {
     return () => {
       socket.emit('leaveWorkflow', { workflowId: id });
       socket.off('executionStarted');
-      socket.off('agent:output');
+      socket.off('agentStarted');
+      socket.off('agentStream');
+      socket.off('agentFinished');
       socket.off('executionCompleted');
       socket.off('executionError');
     };

@@ -2,11 +2,12 @@
 // Enhanced ExecutionPanel — Real-time streaming logs with step indicator
 // ===================================================================
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useWorkflowStore, type ExecutionStep } from '@/stores/workflowStore';
 import {
   X, CheckCircle2, XCircle, Loader2, Clock, Zap,
   ChevronRight, RotateCcw, FileText, Terminal,
+  Copy,
 } from 'lucide-react';
 
 export default function ExecutionPanel() {
@@ -215,6 +216,15 @@ function StepCard({
   const isFailed = step.status === 'failed';
   const isRunning = step.status === 'running' || step.status === 'streaming';
   const displayOutput = streamOutput || step.output;
+  
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    if (!displayOutput) return;
+    navigator.clipboard.writeText(displayOutput);
+    setCopied(true);
+    // You could also add a toast here if you have a toast library
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <div className={`rounded-lg border p-4 transition-all ${
@@ -256,6 +266,15 @@ function StepCard({
             <span className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)]">
               <Clock size={10} /> {(step.durationMs / 1000).toFixed(1)}s
             </span>
+          )}
+          {displayOutput && (
+            <button
+              onClick={handleCopy}
+              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-card-hover)] hover:text-[var(--color-text-primary)] transition"
+              title="Copy Log"
+            >
+              {copied ? <CheckCircle2 size={12} className="text-[var(--color-success)]" /> : <Copy size={12} />}
+            </button>
           )}
           {isRunning && (
             <Loader2 size={14} className="animate-spin text-[var(--color-accent)]" />
