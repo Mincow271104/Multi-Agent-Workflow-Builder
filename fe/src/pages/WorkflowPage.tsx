@@ -14,6 +14,7 @@ import AgentSidebar from '@/components/workflow/AgentSidebar';
 import WorkflowCanvas from '@/components/workflow/WorkflowCanvas';
 import PropertiesPanel from '@/components/workflow/PropertiesPanel';
 import ExecutionPanel from '@/components/workflow/ExecutionPanel';
+import { Terminal } from 'lucide-react';
 import type { Workflow, AgentStepLog } from '@/types';
 
 export default function WorkflowPage() {
@@ -29,7 +30,8 @@ export default function WorkflowPage() {
     nodes, edges, setNodes, setEdges,
     startExecution, onAgentStarted, onAgentStream, onAgentFinished,
     onExecutionCompleted, onExecutionError,
-    showExecution, resetExecution,
+    showExecution, setShowExecution, resetExecution, hydrateExecution,
+    executionId,
   } = useWorkflowStore();
 
   // ── Show toast notification ─────────────────────────────────
@@ -46,9 +48,12 @@ export default function WorkflowPage() {
         setWorkflow(res.data);
         if (res.data.config?.nodes) setNodes(res.data.config.nodes);
         if (res.data.config?.edges) setEdges(res.data.config.edges);
+        if (res.data.executions && res.data.executions.length > 0) {
+          hydrateExecution(res.data.executions[0]);
+        }
       }
     }).catch(() => navigate('/'));
-  }, [id, navigate, setNodes, setEdges]);
+  }, [id, navigate, setNodes, setEdges, hydrateExecution]);
 
   // ── Socket.io — Real-time execution events ──────────────────
   useEffect(() => {
@@ -188,10 +193,22 @@ export default function WorkflowPage() {
           {/* Left: Agent Sidebar */}
           <AgentSidebar />
 
-          {/* Center: Canvas + Execution Panel (split view) */}
-          <div className="flex flex-1 flex-col overflow-hidden">
+          <div className="flex flex-1 flex-col overflow-hidden relative">
             <WorkflowCanvas />
             {showExecution && <ExecutionPanel />}
+
+            {/* Floating Reopen Button */}
+            {!showExecution && executionId && (
+              <button
+                onClick={() => setShowExecution(true)}
+                title="Bật Logs & Kết quả"
+                className="absolute bottom-6 left-1/2 z-30 -translate-x-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-primary)] shadow-2xl shadow-black/20 hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-card)] transition-all animate-in fade-in slide-in-from-bottom-4 group"
+              >
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--color-accent)]/10 text-[var(--color-accent)] group-hover:bg-[var(--color-accent)] group-hover:text-white transition-colors">
+                  <Terminal size={18} />
+                </div>
+              </button>
+            )}
           </div>
 
           {/* Right: Properties Panel */}

@@ -26,12 +26,15 @@ function AgentNodeComponent({ id, data, selected }: NodeProps<AgentNodeType>) {
         ${isFailed ? 'border-[var(--color-error)]/50' : ''}
       `}
     >
-      {/* Input Handle (top) */}
-      <Handle
-        type="target"
-        position={Position.Top}
-        className="!bg-[var(--color-accent)] !border-[var(--color-bg-card)]"
-      />
+      {/* Input Handle (top) — from previous agent in linear chain */}
+      {data.role.toLowerCase() !== 'orchestrator' && (
+        <Handle
+          type="target"
+          position={Position.Top}
+          id="top"
+          className="!bg-[#06b6d4] !border-[var(--color-bg-card)]"
+        />
+      )}
 
       {/* Header */}
       <div className="mb-2 flex items-center justify-between">
@@ -63,12 +66,15 @@ function AgentNodeComponent({ id, data, selected }: NodeProps<AgentNodeType>) {
         </div>
       )}
 
-      {/* Output Handle (bottom) */}
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        className="!bg-[var(--color-accent)] !border-[var(--color-bg-card)]"
-      />
+      {/* Output Handle (bottom) — to next agent in linear chain */}
+      {data.role.toLowerCase() !== 'orchestrator' && (
+        <Handle
+          type="source"
+          position={Position.Bottom}
+          id="bottom"
+          className="!bg-[#06b6d4] !border-[var(--color-bg-card)]"
+        />
+      )}
     </div>
   );
 }
@@ -79,6 +85,7 @@ function getRoleIcon(role: string): string {
     writer: '✍️',
     critic: '🧐',
     publisher: '📢',
+    orchestrator: '🎯',
     summarizer: '📝',
     coder: '💻',
     translator: '🌐',

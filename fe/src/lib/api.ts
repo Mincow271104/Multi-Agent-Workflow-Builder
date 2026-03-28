@@ -50,6 +50,8 @@ export const workflowApi = {
     api.put<ApiResponse<Workflow>>(`/workflows/${id}`, data).then((r) => r.data),
   delete: (id: string) =>
     api.delete<ApiResponse>(`/workflows/${id}`).then((r) => r.data),
+  togglePin: (id: string) =>
+    api.patch<ApiResponse<Workflow>>(`/workflows/${id}/pin`).then((r) => r.data),
 };
 
 // ── Agents ──────────────────────────────────────────────────────

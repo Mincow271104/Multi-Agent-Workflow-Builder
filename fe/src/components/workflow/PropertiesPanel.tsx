@@ -1,17 +1,15 @@
 import { useWorkflowStore } from '@/stores/workflowStore';
 import type { ProviderName } from '@/types';
-import { X, Trash2 } from 'lucide-react';
+import { X, Trash2, Lock, LockOpen } from 'lucide-react';
 
 const PROVIDERS: { value: ProviderName; label: string }[] = [
   { value: 'ollama', label: 'Ollama (Local)' },
-  { value: 'groq', label: 'Groq (Cloud)' },
-  { value: 'gemini', label: 'Gemini (Google)' },
 ];
 
 const MODELS: Record<ProviderName, string[]> = {
-  ollama: ['llama3.2', 'llama3.1', 'phi3:mini', 'llama3', 'mistral', 'gemma2'],
-  groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'],
-  gemini: ['gemini-pro', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+  ollama: ['qwen2.5:14b'],
+  groq: [],
+  gemini: [],
 };
 
 export default function PropertiesPanel() {
@@ -104,15 +102,37 @@ export default function PropertiesPanel() {
           </Field>
 
           {/* System Prompt */}
-          <Field label="System Prompt">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                System Prompt
+              </label>
+              <button
+                onClick={() => updateNodeData(node.id, { isLocked: !data.isLocked })}
+                className={`rounded p-1 transition-colors ${data.isLocked ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-muted)] hover:text-[var(--color-accent)]'}`}
+                title={data.isLocked ? "Unlock to edit" : "Lock prompt"}
+              >
+                {data.isLocked ? <Lock size={12} fill="currentColor" className="fill-opacity-10" /> : <LockOpen size={12} />}
+              </button>
+            </div>
             <textarea
               value={data.systemPrompt || ''}
+              readOnly={data.isLocked}
               onChange={(e) => updateNodeData(node.id, { systemPrompt: e.target.value })}
-              className="input-field min-h-[100px] resize-y"
+              className={`input-field min-h-[140px] resize-y transition-all ${
+                data.isLocked 
+                ? 'opacity-60 cursor-not-allowed bg-[var(--color-bg-secondary)] border-dashed border-[var(--color-border)]' 
+                : 'focus:border-[var(--color-accent)]'
+              }`}
               placeholder="Define the agent's behavior..."
-              rows={4}
+              rows={6}
             />
-          </Field>
+            {data.isLocked && (
+              <p className="text-[10px] text-[var(--color-text-muted)] italic">
+                Standard prompt locked. Unlock to customize behavior.
+              </p>
+            )}
+          </div>
 
           {/* Temperature */}
           <Field label={`Temperature (${data.temperature ?? 0.7})`}>

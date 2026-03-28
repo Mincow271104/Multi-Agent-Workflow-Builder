@@ -73,6 +73,7 @@ model Workflow {
   description String?        @db.Text
   config      Json?          /// Arbitrary JSON config (node positions, edges, etc.)
   status      WorkflowStatus @default(DRAFT)
+  isPinned    Boolean        @default(false)
 
   // ── Relations ─────────────────────────────────────────────────
   userId     String

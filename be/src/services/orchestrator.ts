@@ -1,51 +1,9 @@
-// ===================================================================
-// Orchestrator — Core Multi-Agent Workflow Execution Engine
-// ===================================================================
-//
-// This module takes a workflow definition (React Flow format: nodes +
-// edges) and executes AI agents sequentially.
-//
-// KEY IMPROVEMENTS IN V2 (Deep Thinking + Language Mode):
-//  1. Configurable Deep Thinking (CoT) — Enforces a structured 6-step 
-//     Chain-of-Thought (Understand -> Breakdown -> Analyze -> Self-Critique -> Refine -> Synthesize).
-//  2. Full Language Support — 'vi' (Vietnamese) or 'en' (English). 
-//     Forces the entire CoT and final output into the specified language.
-//  3. Focused Context Passing — We only pass the *final polished output*
-//     of the previous agent forward, rather than flooding the next agent
-//     with its predecessor's internal thinking steps.
-//  4. Custom Agent Support — Ensures "Custom" nodes inherit full
-//     Deep Thinking capabilities exactly like default roles.
-//
-// ===================================================================
-
 import { Server as SocketIOServer } from 'socket.io';
 import prisma from '../config/db';
 import { logger } from '../utils';
 import { ServerEvents } from '../models/types';
-import {
-  getAIProvider,
-  type ProviderName,
-  type ChatMessage,
-} from './aiProviders';
-
-// ─── Configuration — Deep Thinking ──────────────────────────────
-
-export interface DeepThinkingConfig {
-  /** If true, enables the 6-step CoT prompting for all agents */
-  enabled: boolean;
-  /** Max tokens allocated for the deep thinking process */
-  maxTokens: number;
-  /** Keyword used by the agent to demarcate the final polished output */
-  finalOutputMarker: string;
-}
-
-const DEFAULT_DEEP_THINKING_CONFIG: DeepThinkingConfig = {
-  enabled: true,
-  maxTokens: 8192, // Generous limit for deep 6-step reasoning
-  finalOutputMarker: '## Final Output', // The exact heading we instruct agents to use
-};
-
-// ─── Types — React Flow Workflow Format ─────────────────────────
+import { getAIProvider, type ProviderName, type ChatMessage } from './aiProviders';
+import { parseAgentOutput, extractOrchestratorContent } from './agentOutputParser';
 
 export interface WorkflowNode {
   id: string;
@@ -75,17 +33,11 @@ export interface WorkflowConfig {
   edges: WorkflowEdge[];
 }
 
-// ─── Types — Execution Context ──────────────────────────────────
-
 export interface SharedMemory {
-  /** The initial prompt from the human user */
   userInput: string;
-  /** The target language for the workflow ('vi' or 'en') */
   language: string;
-  /** Stores the FULL output of each agent (including its thinking steps) */
   agentOutputs: Record<string, string>;
   variables: Record<string, unknown>;
-  /** Complete historical log of the execution */
   conversationHistory: ChatMessage[];
 }
 
@@ -104,8 +56,6 @@ export interface AgentStepLog {
   durationMs?: number;
 }
 
-// ─── Orchestrator Class ─────────────────────────────────────────
-
 export class Orchestrator {
   private io: SocketIOServer;
   private cancelledExecutions = new Set<string>();
@@ -115,23 +65,19 @@ export class Orchestrator {
     this.io = io;
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // ██  PUBLIC — Main execute() method
-  // ══════════════════════════════════════════════════════════════
-
   async execute(
     executionId: string,
     workflowConfig: WorkflowConfig,
     userInput: string,
-    language: string = 'vi' // Default to Vietnamese if not specified
+    language: string = 'en'
   ) {
     const { nodes, edges } = workflowConfig;
     const workflowId = await this.getWorkflowId(executionId);
 
     await this.updateExecutionStatus(executionId, 'RUNNING', workflowId);
 
-    const executionLevels = this.buildExecutionLevels(nodes, edges);
-    logger.info(`[Orchestrator] Execution ${executionId}: ${nodes.length} agents sequentially (Deep Thinking v2 | Lang: ${language})`);
+    const orchestratorNode = nodes.find((n) => n.data.role?.toLowerCase() === 'orchestrator');
+    logger.info(`[Orchestrator] Execution ${executionId}: ${nodes.length} agents (Mode: ${orchestratorNode ? 'DYNAMIC HYBRID' : 'WATERFALL'})`);
 
     const memory: SharedMemory = {
       userInput,
@@ -144,19 +90,12 @@ export class Orchestrator {
     const stepLogs: AgentStepLog[] = [];
 
     try {
-      for (let level = 0; level < executionLevels.length; level++) {
-        const levelNodes = executionLevels[level];
-
-        if (this.cancelledExecutions.has(executionId)) {
-          logger.info(`[Orchestrator] Execution ${executionId} was cancelled.`);
-          this.cancelledExecutions.delete(executionId);
-          return this.finalizeExecution(executionId, workflowId, 'CANCELLED', stepLogs, memory);
-        }
-
-        // Strictly Sequential Execution within levels
-        for (const node of levelNodes) {
-           await this.executeAgent(executionId, workflowId, node, edges, memory, stepLogs);
-        }
+      if (orchestratorNode && edges.length === 0) {
+        await this.executeDynamic(executionId, workflowId, nodes, orchestratorNode, memory, stepLogs);
+      } else if (orchestratorNode && edges.length > 0) {
+        await this.executeHybridSupervisor(executionId, workflowId, nodes, edges, orchestratorNode, memory, stepLogs);
+      } else {
+        await this.executeWaterfall(executionId, workflowId, nodes, edges, memory, stepLogs);
       }
 
       return this.finalizeExecution(executionId, workflowId, 'COMPLETED', stepLogs, memory);
@@ -189,14 +128,222 @@ export class Orchestrator {
   }
 
   // ══════════════════════════════════════════════════════════════
-  // ██  PRIVATE — Execute a single agent node
+  // ██ DYNAMIC HYBRID MODE
   // ══════════════════════════════════════════════════════════════
+  private async executeDynamic(
+    executionId: string,
+    workflowId: string,
+    nodes: WorkflowNode[],
+    orchestratorNode: WorkflowNode,
+    memory: SharedMemory,
+    stepLogs: AgentStepLog[]
+  ) {
+    const MAX_LOOPS = 12;
+    let loopCount = 0;
 
+    // Remove Orchestrator from available payload agents to prevent it from calling itself
+    const availableAgents = nodes.filter(n => n.id !== orchestratorNode.id);
+
+    // Initial payload sent to Orchestrator
+    let currentPayloadToOrch = JSON.stringify({
+      source: "User",
+      topic: memory.userInput
+    });
+
+    while (loopCount < MAX_LOOPS) {
+      loopCount++;
+      logger.info(`[Dynamic Orchestrator] Loop ${loopCount} starting...`);
+      if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
+
+      // 1. Execute Orchestrator
+      const isFirstLoop = loopCount === 1;
+      const availableAgentNames = availableAgents.map(a => a.data.label).join(', ');
+      
+      let orchPrompt = `AVAILABLE AGENTS TO ROUTE TO: [${availableAgentNames}]\n\nIncoming payload to evaluate:\n\n${currentPayloadToOrch}`;
+      if (isFirstLoop) {
+         orchPrompt += `\n\nYOUR TASK: This is the initial topic from the User. You must start the workflow by choosing the best first agent (typically Researcher). Output your exact MANDATORY format.\nUse the EXACT JSON format below at the end of your response to forward the content:\n` +
+         `\`\`\`json\n{\n  "next_agent": "AgentName",\n  "content": "Topic Prompt forwarded for you to work on: ..."\n}\n\`\`\``;
+      } else {
+         orchPrompt += `\n\nYOUR TASK: Review the agent's output above. If it needs revision, set needs_revision=true and revision_to="AgentName". If it's good, set next_agent="NextAgentName". If the workflow is completely finished, set next_agent=null.\nOutput your MUST-HAVE format.`;
+      }
+
+      const orchResponse = await this.executeAgent(
+        executionId, workflowId, orchestratorNode, 
+        orchPrompt, 
+        memory, stepLogs
+      );
+
+      const { status, forwardContent } = extractOrchestratorContent(orchResponse);
+      const parsedForward = parseAgentOutput(forwardContent);
+
+      // 2. Determine Next Agent Target
+      let targetAgentName: string | null = null;
+      let targetPayload = forwardContent;
+
+      if (parsedForward.needs_revision && parsedForward.revision_to && parsedForward.revision_to !== 'none' && parsedForward.revision_to !== 'null') {
+        targetAgentName = parsedForward.revision_to;
+        targetPayload = `⚠️ REVISION REQUEST FROM ORCHESTRATOR:\n${status}\n\nYour previous output:\n${forwardContent}`;
+      } else if (parsedForward.next_agent && parsedForward.next_agent !== 'none' && parsedForward.next_agent !== 'null') {
+        targetAgentName = parsedForward.next_agent;
+      }
+
+      // If Orchestrator failed to format JSON, fallback to starting with Researcher
+      if (!targetAgentName && loopCount === 1) {
+        targetAgentName = availableAgents.find(a => a.data.role.toLowerCase() === 'researcher')?.data.label || availableAgents[0]?.data.label;
+      }
+
+      // 3. Stop Condition
+      if (!targetAgentName || targetAgentName.toLowerCase() === 'none' || targetAgentName === 'null') {
+        logger.info('[Dynamic Orchestrator] Workflow fully completed (no target agent).');
+        break;
+      }
+
+      const targetAgentNode = availableAgents.find(a => a.data.label.toLowerCase() === targetAgentName!.toLowerCase());
+      if (!targetAgentNode) {
+        logger.warn(`[Dynamic Orchestrator] Output targeted unknown agent: ${targetAgentName}. Stopping.`);
+        break;
+      }
+
+      // 4. Execute Target Agent
+      logger.info(`[Dynamic Orchestrator] Routing to: ${targetAgentNode.data.label}`);
+      if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
+
+      const agentResponse = await this.executeAgent(
+        executionId, workflowId, targetAgentNode, 
+        `Please fulfill your task.\n\nORCHESTRATOR DIRECTIVE & PAYLOAD:\n${targetPayload}`, 
+        memory, stepLogs
+      );
+
+      // 5. Feed agent response back to Orchestrator for the next loop
+      currentPayloadToOrch = agentResponse;
+    }
+
+    if (loopCount >= MAX_LOOPS) {
+      logger.warn('[Dynamic Orchestrator] Max loops reached! Forcing workflow stop.');
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // ██ HYBRID SUPERVISOR MODE
+  // ══════════════════════════════════════════════════════════════
+  private async executeHybridSupervisor(
+    executionId: string,
+    workflowId: string,
+    nodes: WorkflowNode[],
+    edges: WorkflowEdge[],
+    orchestratorNode: WorkflowNode,
+    memory: SharedMemory,
+    stepLogs: AgentStepLog[]
+  ) {
+    const MAX_FEEDBACK_ROUNDS = 3;
+    const executionLevels = this.buildExecutionLevels(nodes, edges);
+    // Remove Orchestrator from the main linear sequence so it only acts as a supervisor
+    const executionSequence = executionLevels.flat().filter(n => n.id !== orchestratorNode.id);
+    
+    let workingContent = memory.userInput;
+    let previousNode: WorkflowNode | null = null;
+    let previousAgentContent = memory.userInput;
+
+    for (const node of executionSequence) {
+      if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
+
+      logger.info(`[Hybrid] Executing Agent: ${node.data.label}`);
+      
+      const payloadContext = `--- ORIGINAL USER DIRECTIVE ---\n${memory.userInput}\n\n--- CONTENT PRODUCED BY PREVIOUS AGENT (You must process this) ---\n${workingContent}`;
+
+      let agentResponse = await this.executeAgent(
+        executionId, workflowId, node, 
+        `Please execute your specific role.\n\n${payloadContext}`, 
+        memory, stepLogs
+      );
+
+      let parsedAgent = parseAgentOutput(agentResponse);
+
+      // ── FEEDBACK LOOP TRIGGER ──
+      if (parsedAgent.needs_revision && previousNode) {
+        let round = 0;
+        logger.info(`[Hybrid] 🛑 REVISION TRIGGERED: ${node.data.label} rejected ${previousNode.data.label}'s output!`);
+
+        while (round < MAX_FEEDBACK_ROUNDS && parsedAgent.needs_revision) {
+          round++;
+          logger.info(`[Hybrid] Feedback Loop Round ${round}...`);
+          if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
+
+          // 1. Orchestrator Criticizes Previous Node
+          const orchPrompt = `HYBRID SUPERVISOR MODE\n\n--- ORIGINAL GOAL ---\n${memory.userInput}\n\nAgent [${node.data.label}] rejected the work of Agent [${previousNode.data.label}].\n\nCOMPLAINT FROM ${node.data.label}:\n${parsedAgent.final_output || agentResponse}\n\nORIGINAL WORK FROM ${previousNode.data.label}:\n${previousAgentContent}\n\nYOUR TASK: You are the Orchestrator Supervisor. Review the complaint against the ORIGINAL GOAL. Write a harsh, specific criticism and actionable directives for [${previousNode.data.label}] to fix their work. Do not output routing JSON, just the feedback text.`;
+          
+          const orchFeedback = await this.executeAgent(executionId, workflowId, orchestratorNode, orchPrompt, memory, stepLogs);
+
+          // 2. Previous Node Redoes Work
+          if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
+          const redoPrompt = `⚠️ YOUR PREVIOUS WORK WAS REJECTED BY ${node.data.label}!\n\n--- ORIGINAL GOAL ---\n${memory.userInput}\n\nCOMPLAINT:\n${parsedAgent.final_output || agentResponse}\n\nDIRECTIVE FROM ORCHESTRATOR SUPERVISOR:\n${orchFeedback}\n\nYOUR TASK: You must completely redo your work based on this feedback, making sure you align perfectly with the ORIGINAL GOAL. Output your standard JSON.`;
+          
+          const redoResponse = await this.executeAgent(executionId, workflowId, previousNode, redoPrompt, memory, stepLogs);
+          const parsedRedo = parseAgentOutput(redoResponse);
+          previousAgentContent = parsedRedo.final_output;
+
+          // 3. Current Node Re-Evaluates
+          if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
+          const reEvalPrompt = `--- ORIGINAL USER DIRECTIVE ---\n${memory.userInput}\n\nAgent [${previousNode.data.label}] has revised their work based on your feedback.\n\nREVISED WORK:\n${parsedRedo.final_output}\n\nYOUR TASK: Re-evaluate this new work according to your role's standards and the ORIGINAL GOAL. If it's good, set "needs_revision": false. If it still fails, set "needs_revision": true and provide a new complaint. Output your standard JSON.`;
+          
+          agentResponse = await this.executeAgent(executionId, workflowId, node, reEvalPrompt, memory, stepLogs);
+          parsedAgent = parseAgentOutput(agentResponse);
+        }
+
+        if (round >= MAX_FEEDBACK_ROUNDS && parsedAgent.needs_revision) {
+          logger.warn(`[Hybrid] Max feedback rounds (${MAX_FEEDBACK_ROUNDS}) reached. Forcing workflow progression.`);
+        }
+      }
+
+      workingContent = parsedAgent.final_output;
+      previousAgentContent = parsedAgent.final_output;
+      previousNode = node;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // ██ WATERFALL LINEAR MODE
+  // ══════════════════════════════════════════════════════════════
+  private async executeWaterfall(
+    executionId: string,
+    workflowId: string,
+    nodes: WorkflowNode[],
+    edges: WorkflowEdge[],
+    memory: SharedMemory,
+    stepLogs: AgentStepLog[]
+  ) {
+    const executionLevels = this.buildExecutionLevels(nodes, edges);
+    const executionSequence = executionLevels.flat();
+    
+    let workingContent = memory.userInput;
+
+    for (const node of executionSequence) {
+      if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
+
+      logger.info(`[Waterfall] Executing Agent: ${node.data.label}`);
+      
+      const payloadContext = `--- ORIGINAL USER DIRECTIVE ---\n${memory.userInput}\n\n--- CONTENT PRODUCED BY PREVIOUS AGENT (You must process this) ---\n${workingContent}`;
+
+      const agentResponse = await this.executeAgent(
+        executionId, workflowId, node, 
+        `Please execute your specific role.\n\n${payloadContext}`, 
+        memory, stepLogs
+      );
+
+      // Extract JSON content to pass down the waterfall cleanly, or pass raw if JSON invalid
+      const parsedAgent = parseAgentOutput(agentResponse);
+      workingContent = parsedAgent.final_output;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // ██ BASE: EXECUTE SINGLE AGENT
+  // ══════════════════════════════════════════════════════════════
   private async executeAgent(
     executionId: string,
     workflowId: string,
     node: WorkflowNode,
-    edges: WorkflowEdge[],
+    currentTaskInput: string,
     memory: SharedMemory,
     stepLogs: AgentStepLog[],
   ): Promise<string> {
@@ -210,73 +357,22 @@ export class Orchestrator {
       provider: data.provider,
       model: data.model,
       status: 'running',
-      input: '',
+      input: currentTaskInput,
       output: '',
       startedAt: new Date().toISOString(),
     };
 
     try {
-      // ── 1. Gather context from parent agents ────────────────────
-      const parentNodeIds = edges
-        .filter((e) => e.target === node.id)
-        .map((e) => e.source);
-
-      const isRoot = parentNodeIds.length === 0;
-
-      // Extract *only* the refined final output from the previous agent
-      // to keep the context clean and focused, preventing context degradation.
-      let polishedPreviousOutput = '';
-      if (!isRoot) {
-        polishedPreviousOutput = parentNodeIds
-          .filter((pid) => memory.agentOutputs[pid]) 
-          .map((pid) => this.extractPolishedOutput(memory.agentOutputs[pid]))
-          .join('\n\n---\n\n');
-      }
-
-      // ── 2. Build Memory Chain & Chat Messages ────────────────────
       const messages: ChatMessage[] = [];
-
-      // A. Deep Thinking + Language System Prompt
-      const systemPrompt = this.buildSystemPrompt(node, memory.language);
-      messages.push({ role: 'system', content: systemPrompt });
-
-      // B. Structure the task instruction
-      let currentTaskInput = '';
+      const systemPrompt = data.systemPrompt || `You are a ${data.role} agent.\n\nReturn JSON strictly.`;
       
-      if (isRoot) {
-        currentTaskInput = memory.language === 'vi' 
-          ? `Đây là yêu cầu gốc từ người dùng:\n\n"${memory.userInput}"\n\nHãy thực hiện vai trò chuyên gia của bạn để giải quyết yêu cầu này theo đúng quy trình suy nghĩ sâu.`
-          : `Here is your initial user task:\n\n"${memory.userInput}"\n\nPlease execute your specialized role to address this task following your deep thinking protocol.`;
-      } else {
-        if (memory.language === 'vi') {
-          currentTaskInput = `Yêu cầu gốc từ người dùng: "${memory.userInput}"
-
-Đây là ngữ cảnh/kết quả từ (các) bước trước:
-=========================================
-${polishedPreviousOutput}
-=========================================
-
-Nhiệm vụ của bạn:
-Với vai trò ${data.role}, hãy thực hiện nhiệm vụ chuyên môn của bạn trên kết quả trên. 
-QUY TẮC QUAN TRỌNG: KHÔNG ĐƯỢC sao chép hay lặp lại kết quả trước đó. Bạn phải phân tích nó thật sâu sắc theo đúng vai trò của mình. Trình bày suy nghĩ 6 bước trước, sau đó là kết quả cuối cùng đã được trau chuốt hoàn hảo.`;
-        } else {
-          currentTaskInput = `Original User Request: "${memory.userInput}"
-
-Here is the context/output from the previous step(s):
-=========================================
-${polishedPreviousOutput}
-=========================================
-
-Your Task:
-As a ${data.role}, perform your specialized task on the above output. 
-CRITICAL RULE: DO NOT simply copy or repeat the previous output. You must analyze it deeply according to your role. Present your 6-step thinking first, then the polished final outcome.`;
-        }
-      }
-
+      messages.push({ role: 'system', content: systemPrompt });
       messages.push({ role: 'user', content: currentTaskInput });
-      stepLog.input = currentTaskInput;
 
-      // ── 3. Emit "agentStarted" event ───────────────────────────
+      // Save initial running state
+      stepLogs.push(stepLog);
+      await this.saveProgress(executionId, stepLogs);
+
       this.io.to(`workflow:${workflowId}`).emit('agentStarted', {
         executionId,
         nodeId: node.id,
@@ -287,8 +383,9 @@ CRITICAL RULE: DO NOT simply copy or repeat the previous output. You must analyz
         timestamp: new Date().toISOString(),
       });
 
-      // Show an initial "Thinking deeply..." payload in the correct language
-      let fullOutput = memory.language === 'vi' ? 'Đang suy nghĩ sâu...\n\n' : 'Thinking deeply...\n\n';
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      let fullOutput = memory.language === 'vi' ? 'Đang tải model (tốn 1-2 phút) và suy nghĩ...\n\n' : 'Loading model and thinking deeply...\n\n';
       this.io.to(`workflow:${workflowId}`).emit('agentStream', {
         executionId,
         nodeId: node.id,
@@ -298,19 +395,14 @@ CRITICAL RULE: DO NOT simply copy or repeat the previous output. You must analyz
         timestamp: new Date().toISOString(),
       });
 
-      // ── 4. Stream AI response ───────────────────────────────────
       const provider = getAIProvider(data.provider);
       let isFirstChunk = true;
-      const maxTokens = DEFAULT_DEEP_THINKING_CONFIG.enabled 
-        ? DEFAULT_DEEP_THINKING_CONFIG.maxTokens 
-        : (data.maxTokens ?? 2048);
+      const maxTokens = data.maxTokens ?? 8192;
 
       const abortController = new AbortController();
       this.abortControllers.set(executionId, abortController);
 
-      if (this.cancelledExecutions.has(executionId)) {
-        throw new Error('Execution stopped by user');
-      }
+      if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
 
       for await (const chunk of provider.chatStream({
         model: data.model,
@@ -320,14 +412,12 @@ CRITICAL RULE: DO NOT simply copy or repeat the previous output. You must analyz
         signal: abortController.signal,
       })) {
         if (isFirstChunk) {
-          // Clear the placebo text once the real stream starts
           fullOutput = '';
           isFirstChunk = false;
         }
 
         fullOutput += chunk;
 
-        // Emit 'agentStream'
         this.io.to(`workflow:${workflowId}`).emit('agentStream', {
           executionId,
           nodeId: node.id,
@@ -338,24 +428,17 @@ CRITICAL RULE: DO NOT simply copy or repeat the previous output. You must analyz
         });
       }
 
-      // ── 5. Store output in shared memory ────────────────────────
       memory.agentOutputs[node.id] = fullOutput;
-      
-      // Store the full context (including thoughts) in the database history
-      memory.conversationHistory.push(
-        { role: 'user', content: `[${data.role}] executed task.` },
-        { role: 'assistant', content: fullOutput },
-      );
+      memory.conversationHistory.push({ role: 'user', content: `[${data.label}] executed task.` });
+      memory.conversationHistory.push({ role: 'assistant', content: fullOutput });
 
-      // ── 6. Complete the step log ────────────────────────────────
       const durationMs = Date.now() - startTime;
       stepLog.status = 'completed';
       stepLog.output = fullOutput;
       stepLog.completedAt = new Date().toISOString();
       stepLog.durationMs = durationMs;
-      stepLogs.push(stepLog);
+      await this.saveProgress(executionId, stepLogs);
 
-      // ── 7. Emit "agentFinished" event ─────────────────────────
       this.io.to(`workflow:${workflowId}`).emit('agentFinished', {
         executionId,
         nodeId: node.id,
@@ -376,7 +459,7 @@ CRITICAL RULE: DO NOT simply copy or repeat the previous output. You must analyz
       stepLog.error = errorMessage;
       stepLog.completedAt = new Date().toISOString();
       stepLog.durationMs = Date.now() - startTime;
-      stepLogs.push(stepLog);
+      await this.saveProgress(executionId, stepLogs);
 
       this.io.to(`workflow:${workflowId}`).emit('executionError', {
         executionId,
@@ -391,30 +474,8 @@ CRITICAL RULE: DO NOT simply copy or repeat the previous output. You must analyz
   }
 
   // ══════════════════════════════════════════════════════════════
-  // ██  PRIVATE — Graph Utilities & Helpers
+  // ██ UTILITIES
   // ══════════════════════════════════════════════════════════════
-
-  /**
-   * Helper function that parses the output from the previous agent
-   * and extracts ONLY the final answer (ignoring the CoT steps)
-   * to provide clean context for the next agent.
-   */
-  private extractPolishedOutput(fullOutput: string): string {
-    if (!DEFAULT_DEEP_THINKING_CONFIG.enabled) return fullOutput;
-
-    // Use regex to find everything after the "## Final Output" heading (case-insensitive)
-    const marker = DEFAULT_DEEP_THINKING_CONFIG.finalOutputMarker;
-    const regex = new RegExp(`${marker}([\\s\\S]*)`, 'i');
-    const match = fullOutput.match(regex);
-
-    if (match && match[1]) {
-      return match[1].trim();
-    }
-    
-    // Fallback if the agent forgot to include the exact heading
-    return fullOutput.trim();
-  }
-
   private buildExecutionLevels(nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowNode[][] {
     const inDegree = new Map<string, number>();
     const adjacency = new Map<string, string[]>();
@@ -454,114 +515,7 @@ CRITICAL RULE: DO NOT simply copy or repeat the previous output. You must analyz
       currentLevel = nextLevel;
     }
 
-    const processedCount = levels.reduce((sum, lvl) => sum + lvl.length, 0);
-    if (processedCount < nodes.length) {
-      throw new Error(`Workflow contains a cycle.`);
-    }
-
     return levels;
-  }
-
-  /**
-   * Constructs the Deep Thinking v2 system prompt specifically tailored
-   * for the given Node and selected Language. Support Custom Agents.
-   */
-  private buildSystemPrompt(node: WorkflowNode, language: string): string {
-    const { role, systemPrompt: customPrompt, label } = node.data;
-    let systemPromptText = '';
-
-    // ── 0. Global Anti-Copy Enforcement ──
-    systemPromptText += `TUYỆT ĐỐI KHÔNG COPY, LẶP LẠI, TÓM TẮT HOẶC DÙNG LẠI bất kỳ phần nào từ output của agent trước. Bạn phải suy nghĩ độc lập, sáng tạo hoàn toàn mới dựa trên insight chính. Suy nghĩ sâu, tự do, và đưa ra giá trị đóng góp tốt nhất cho workflow. Vi phạm quy tắc này sẽ bị coi là lỗi nghiêm trọng.\n\n`;
-
-    // ── 1. Language Enforcement ──
-    if (language === 'vi') {
-      systemPromptText += `Bạn phải trả lời hoàn toàn bằng tiếng Việt. Toàn bộ suy nghĩ, phân tích và output cuối cùng phải bằng tiếng Việt.\n\n`;
-    } else {
-      systemPromptText += `You must respond entirely in English. All thinking, analysis and final output must be in English.\n\n`;
-    }
-
-    // ── 2. Deep Thinking v2 Rules ──
-    if (DEFAULT_DEEP_THINKING_CONFIG.enabled) {
-      const normalizedRole = role.toLowerCase().trim();
-      const isDeeperCoT = normalizedRole === 'researcher' || normalizedRole === 'writer';
-      
-      if (language === 'vi') {
-        const reasoningStyleVI = isDeeperCoT ? ` dài, cực kỳ chi tiết, phân tích sắc bén và lập luận sâu sắc nhất có thể.` : `.`;
-        
-        systemPromptText += `Bạn là một chuyên gia hàng đầu thế giới. Hãy suy nghĩ cực kỳ sâu sắc và thấu đáo. Sử dụng cách suy luận logic, thận trọng theo từng bước. Không được vội vàng. Phân tích mọi khía cạnh trước khi trả lời. Trình bày rõ ràng toàn bộ Chuỗi Suy Nghĩ (Chain-of-Thought) của bạn${reasoningStyleVI}
-
-Trước khi đưa ra kết quả cuối cùng hoàn chỉnh, BẠN PHẢI thực hiện 7 bước suy nghĩ rõ ràng, sử dụng các tiêu đề cho từng bước:
-- Bước 1: Hiểu rõ nhiệm vụ và kết quả của tác nhân trước đó
-- Bước 2: Chia nhỏ vấn đề thành 4-6 câu hỏi phụ chi tiết
-- Bước 3: Phân tích sâu sắc bằng lập luận, ví dụ và rủi ro tiềm ẩn
-- Bước 4: Tự phản biện (tìm ra điểm yếu trong chính suy nghĩ của bạn)
-- Bước 5: Tinh chỉnh và củng cố câu trả lời
-- Bước 6: Đối chiếu chéo với các ví dụ chuẩn mực thực tế và tìm kiếm các mâu thuẫn tiềm ẩn
-- Bước 7: Tổng hợp thành kết quả cuối cùng hoàn hảo
-
-Chỉ sau khi hoàn thành 7 bước này, bạn mới xuất ra Kết Quả Cuối Cùng dưới một tiêu đề rõ ràng là "${DEFAULT_DEEP_THINKING_CONFIG.finalOutputMarker}".\n\n`;
-      } else {
-        const reasoningStyleEN = isDeeperCoT ? `, making it extremely long, highly analytical, and heavily detailed.` : `.`;
-        
-        systemPromptText += `You are a world-class expert. Think extremely deeply and thoroughly. Use slow, careful, step-by-step reasoning. Do not rush. Analyze every angle before answering. Show your full Chain-of-Thought clearly${reasoningStyleEN}
-
-Before providing your final polished output, you MUST perform an explicit internal Chain-of-Thought (CoT) with the following 7 steps. Present your thinking clearly using headings for each step:
-- Step 1: Fully understand the task + previous agent output
-- Step 2: Break down into 4-6 detailed sub-questions
-- Step 3: Deep analysis with reasoning, examples, and potential risks
-- Step 4: Self-critique (find weaknesses in my own thinking)
-- Step 5: Refine and improve the answer
-- Step 6: Cross-check with real-world examples and potential contradictions
-- Step 7: Synthesize into polished final output
-
-Only after you have completed these 7 thinking steps should you output your Final Result under a clean "${DEFAULT_DEEP_THINKING_CONFIG.finalOutputMarker}" heading.\n\n`;
-      }
-    }
-
-    // ── 3. Role/Custom Agent Context ──
-    const normalizedRole = role.toLowerCase().trim();
-    const isCustom = node.type === 'custom' || normalizedRole === 'custom' || normalizedRole === 'custom agent';
-
-    if (isCustom) {
-      if (language === 'vi') {
-        systemPromptText += `Bạn đang hoạt động dưới vai trò một Tác Nhân Tùy Chỉnh có tên "${label}".
-Vui lòng tuân thủ chặt chẽ các hướng dẫn chuyên môn sau đây:
------------------------------------------
-${customPrompt || 'Hãy thực hiện nhiệm vụ được yêu cầu một cách tốt nhất.'}
------------------------------------------
-Áp dụng quy trình suy nghĩ sâu của bạn vào các hướng dẫn này một cách xuất sắc.`;
-      } else {
-        systemPromptText += `You are operating as a Specialized Custom Agent titled "${label}".
-Your specific role instructions are:
------------------------------------------
-${customPrompt || 'Perform the requested task to the best of your ability.'}
------------------------------------------
-Apply your deep thinking protocol perfectly to satisfy these custom instructions.`;
-      }
-    } else {
-      // DEFAULT PRE-BUILT AGENTS
-      const rolePromptsEN: Record<string, string> = {
-        researcher: `You are a Deep Researcher agent. Conduct deep market analysis with real data, numbers, comparisons. Dive beyond surface-level facts.`,
-        writer: `You are a Deep Writer agent. Engage in deep creative thinking: brainstorm multiple angles, select the absolute best one, justify your selection, and write a high-impact narrative.`,
-        critic: `You are a Deep Critic agent. Engage in deep critical thinking: find hidden weaknesses, analyze psychological impacts, consider long-term effects, and tear down assumptions relentlessly.`,
-        publisher: `You are a Deep Publisher agent. Perform deep optimization thinking: evaluate various publishing formats, choose the most viral/effective one, explicitly justify your choice, and format it perfectly.`,
-      };
-
-      const rolePromptsVI: Record<string, string> = {
-        researcher: `Bạn là Tác nhân Nghiên Cứu Chuyên Sâu. Tiến hành phân tích thị trường sâu sắc với dữ liệu thực, con số, so sánh. Đi sâu hơn các sự thật bề nổi.`,
-        writer: `Bạn là Tác nhân Viết lách Chuyên Sâu. Suy nghĩ sáng tạo sâu sắc: suy nghĩ về nhiều góc độ, chọn góc xuất sắc nhất, giải thích sự lựa chọn của bạn và viết ra cấu trúc kể chuyện gây ấn tượng mạnh.`,
-        critic: `Bạn là Tác nhân Phê Bình Chuyên Sâu. Thực hiện tư duy phản biện: tìm ra các điểm yếu ẩn giấu, phân tích tác động tâm lý, xem xét ảnh hưởng lâu dài và phá vỡ các định kiến.`,
-        publisher: `Bạn là Tác nhân Xuất Bản Chuyên Sâu. Tối ưu hóa sâu sắc: đánh giá các định dạng xuất bản khác nhau, chọn định dạng có khả năng viral/hiệu quả nhất, biện minh rõ ràng cho sự lựa chọn của bạn và định dạng nó một cách hoàn hảo.`,
-      };
-
-      if (language === 'vi') {
-        systemPromptText += rolePromptsVI[normalizedRole] || `Bạn là một tác nhân ${role}. Hãy thực hiện tốt chức năng của mình vào ngữ cảnh nhiệm vụ bằng tư duy sâu.`;
-      } else {
-        systemPromptText += rolePromptsEN[normalizedRole] || `You are a ${role} agent. Apply your role effectively to the task context using deep thinking.`;
-      }
-    }
-
-    return systemPromptText;
   }
 
   private async getWorkflowId(executionId: string): Promise<string> {
@@ -589,6 +543,17 @@ Apply your deep thinking protocol perfectly to satisfy these custom instructions
     });
   }
 
+  private async saveProgress(executionId: string, stepLogs: AgentStepLog[]) {
+    try {
+      await prisma.execution.update({
+        where: { id: executionId },
+        data: { logs: JSON.parse(JSON.stringify(stepLogs)) }
+      });
+    } catch (e) {
+      logger.error(`[Orchestrator] Failed to save early progress for ${executionId}:`, e);
+    }
+  }
+
   private async finalizeExecution(
     executionId: string,
     workflowId: string,
@@ -598,14 +563,13 @@ Apply your deep thinking protocol perfectly to satisfy these custom instructions
     errorMessage?: string,
   ) {
     const allOutputs = Object.values(memory.agentOutputs);
-    // For the final execution result payload, store the raw output here so we don't lose the CoT trace
     const finalOutput = allOutputs.length > 0 ? allOutputs[allOutputs.length - 1] : '';
 
     const result: Record<string, unknown> = {
       output: finalOutput,
       allAgentOutputs: memory.agentOutputs,
       variables: memory.variables,
-      conversationHistory: memory.conversationHistory, // Store history in execution record
+      conversationHistory: memory.conversationHistory,
     };
     if (errorMessage) result.error = errorMessage;
 

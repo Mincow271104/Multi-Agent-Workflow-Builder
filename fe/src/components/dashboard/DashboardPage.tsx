@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { workflowApi } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import type { Workflow } from '@/types';
-import { Plus, Trash2, Bot, LogOut, Clock, Layers } from 'lucide-react';
+import { Plus, Trash2, Bot, LogOut, Clock, Layers, Pin } from 'lucide-react';
 
 export default function DashboardPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -13,8 +13,9 @@ export default function DashboardPage() {
   const { user, logout } = useAuthStore();
   const navigate = useNavigate();
 
-  const loadWorkflows = async () => {
+  const loadWorkflows = async (showLoading = true) => {
     try {
+      if (showLoading) setLoading(true);
       const res = await workflowApi.getAll();
       setWorkflows(res.data || []);
     } finally {
@@ -22,21 +23,89 @@ export default function DashboardPage() {
     }
   };
 
-  useEffect(() => { loadWorkflows(); }, []);
+  // Initial load
+  useEffect(() => { 
+    loadWorkflows(true); 
+  }, []);
+
+  // Polling for concurrent background executions
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadWorkflows(false);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, []);
 
   const createWorkflow = async () => {
     if (!newName.trim()) return;
     await workflowApi.create({ name: newName.trim() });
     setNewName('');
     setShowCreate(false);
-    loadWorkflows();
+    loadWorkflows(true);
+  };
+
+  const togglePin = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await workflowApi.togglePin(id);
+      loadWorkflows(false);
+    } catch (error: any) {
+      console.error(error);
+    }
   };
 
   const deleteWorkflow = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!confirm('Delete this workflow?')) return;
-    await workflowApi.delete(id);
-    loadWorkflows();
+    try {
+      await workflowApi.delete(id);
+      loadWorkflows(true);
+    } catch (error: any) {
+      console.error(error);
+      alert(error.response?.data?.message || 'Failed to delete workflow. Ensure the server is running.');
+    }
+  };
+
+  const getRunStatus = (wf: Workflow): 'Running' | 'Done' | 'Boring' => {
+    const latestRun = wf.executions?.[0];
+    if (!latestRun) return 'Boring';
+    
+    if (latestRun.status === 'RUNNING' || latestRun.status === 'PENDING') {
+      return 'Running';
+    }
+    
+    if (latestRun.status === 'COMPLETED' || latestRun.status === 'FAILED' || latestRun.status === 'CANCELLED') {
+      const viewed = JSON.parse(localStorage.getItem('viewed_executions') || '[]');
+      if (viewed.includes(latestRun.id)) {
+        return 'Boring';
+      }
+      return 'Done';
+    }
+    
+    return 'Boring';
+  };
+
+  const getRunStatusText = (wf: Workflow, baseStatus: string) => {
+    if (baseStatus === 'Running') {
+      const logs = wf.executions?.[0]?.logs || [];
+      const total = wf._count?.agents || 1;
+      const currentStep = logs.length > 0 ? logs.length : 1;
+      const currentAgent = logs.length > 0 ? (logs[logs.length - 1] as any).agentName : 'Preparing';
+      return `Running: ${currentStep}/${total} - ${currentAgent}`;
+    }
+    return baseStatus;
+  };
+
+  const handleOpenWorkflow = (wf: Workflow) => {
+    const latestRun = wf.executions?.[0];
+    if (latestRun && (latestRun.status === 'COMPLETED' || latestRun.status === 'FAILED' || latestRun.status === 'CANCELLED')) {
+      const viewed = JSON.parse(localStorage.getItem('viewed_executions') || '[]');
+      if (!viewed.includes(latestRun.id)) {
+        viewed.push(latestRun.id);
+        localStorage.setItem('viewed_executions', JSON.stringify(viewed));
+      }
+    }
+    navigate(`/workflow/${wf.id}`);
   };
 
   return (
@@ -98,7 +167,7 @@ export default function DashboardPage() {
           )}
 
           {/* Workflow Grid */}
-          {loading ? (
+          {loading && workflows.length === 0 ? (
             <div className="flex justify-center py-20">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
             </div>
@@ -110,37 +179,61 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {workflows.map((wf) => (
-                <div
-                  key={wf.id}
-                  onClick={() => navigate(`/workflow/${wf.id}`)}
-                  className="glass-card group cursor-pointer p-5 transition-all hover:border-[var(--color-accent)]/50 hover:shadow-lg hover:shadow-[var(--color-accent)]/5"
-                >
-                  <div className="mb-3 flex items-start justify-between">
-                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)] truncate pr-4">{wf.name}</h3>
-                    <button
-                      onClick={(e) => deleteWorkflow(wf.id, e)}
-                      className="rounded p-1 text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100 hover:text-[var(--color-error)]"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+              {workflows.map((wf) => {
+                const runStatus = getRunStatus(wf);
+                return (
+                  <div
+                    key={wf.id}
+                    onClick={() => handleOpenWorkflow(wf)}
+                    className={`glass-card group cursor-pointer p-5 transition-all hover:shadow-lg ${
+                      runStatus === 'Running' ? 'border-[var(--color-accent)] shadow-[var(--color-accent)]/10 ring-1 ring-[var(--color-accent)]/50' : 
+                      runStatus === 'Done' ? 'border-[var(--color-success)] shadow-[var(--color-success)]/10' :
+                      'hover:border-[var(--color-accent)]/50 hover:shadow-[var(--color-accent)]/5'
+                    }`}
+                  >
+                    <div className="mb-3 flex items-start justify-between">
+                      <div className="flex items-center gap-2 overflow-hidden flex-1">
+                        {wf.isPinned && <Pin size={14} className="text-[var(--color-accent)] fill-[var(--color-accent)] shrink-0 rotate-45" />}
+                        <h3 className="text-sm font-semibold text-[var(--color-text-primary)] truncate">{wf.name}</h3>
+                      </div>
+                      <div className="flex items-center gap-1 opacity-100 lg:opacity-0 transition-opacity group-hover:opacity-100">
+                        <button
+                          onClick={(e) => togglePin(wf.id, e)}
+                          className={`rounded p-1 transition-colors ${wf.isPinned ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-muted)] hover:text-[var(--color-accent)]'}`}
+                        >
+                          <Pin size={14} className={`${wf.isPinned ? 'fill-[var(--color-accent)]' : ''} ${wf.isPinned ? 'rotate-45' : ''}`} />
+                        </button>
+                        <button
+                          onClick={(e) => deleteWorkflow(wf.id, e)}
+                          className="rounded p-1 text-[var(--color-text-muted)] hover:text-[var(--color-error)]"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                    {wf.description && (
+                      <p className="mb-3 text-xs text-[var(--color-text-muted)] line-clamp-2">{wf.description}</p>
+                    )}
+                    <div className="flex items-center gap-3 text-[10px] text-[var(--color-text-muted)] font-medium">
+                      
+                      {/* Run Status Badge */}
+                      <span className={`flex items-center gap-1.5 rounded-md px-2 py-0.5 uppercase tracking-wider ${
+                        runStatus === 'Running' ? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)]' :
+                        runStatus === 'Done' ? 'bg-[var(--color-success)]/10 text-[var(--color-success)]' :
+                        'bg-[var(--color-bg-card-hover)] text-[var(--color-text-muted)]'
+                      }`}>
+                        {runStatus === 'Running' && <div className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-ping" />}
+                        {runStatus === 'Done' && <div className="h-1.5 w-1.5 rounded-full bg-[var(--color-success)]" />}
+                        {runStatus === 'Boring' && <div className="h-1.5 w-1.5 rounded-full bg-[var(--color-text-muted)]" />}
+                        {getRunStatusText(wf, runStatus)}
+                      </span>
+                      
+                      <span className="flex items-center gap-1"><Bot size={10} /> {wf._count?.agents || 0} agents</span>
+                      <span className="flex items-center gap-1"><Clock size={10} /> {new Date(wf.updatedAt).toLocaleDateString()}</span>
+                    </div>
                   </div>
-                  {wf.description && (
-                    <p className="mb-3 text-xs text-[var(--color-text-muted)] line-clamp-2">{wf.description}</p>
-                  )}
-                  <div className="flex items-center gap-3 text-[10px] text-[var(--color-text-muted)]">
-                    <span className={`rounded-md px-2 py-0.5 font-semibold uppercase ${
-                      wf.status === 'ACTIVE' ? 'bg-[var(--color-success)]/10 text-[var(--color-success)]' :
-                      wf.status === 'DRAFT' ? 'bg-[var(--color-warning)]/10 text-[var(--color-warning)]' :
-                      'bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)]'
-                    }`}>
-                      {wf.status}
-                    </span>
-                    <span className="flex items-center gap-1"><Bot size={10} /> {wf._count?.agents || 0} agents</span>
-                    <span className="flex items-center gap-1"><Clock size={10} /> {new Date(wf.updatedAt).toLocaleDateString()}</span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

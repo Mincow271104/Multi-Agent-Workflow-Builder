@@ -25,6 +25,9 @@ router.get('/:id', workflowController.getById);
 /** PUT    /api/v1/workflows/:id     — Update workflow */
 router.put('/:id', workflowController.update);
 
+/** PATCH  /api/v1/workflows/:id/pin — Toggle pinned status */
+router.patch('/:id/pin', workflowController.togglePin);
+
 /** DELETE /api/v1/workflows/:id     — Delete workflow (cascades) */
 router.delete('/:id', workflowController.remove);
 

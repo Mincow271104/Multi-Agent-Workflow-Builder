@@ -109,9 +109,42 @@ export const getAll = catchAsync(async (req: Request, res: Response) => {
         orderBy: { order: 'asc' },
         select: { id: true, name: true, provider: true, model: true },
       },
+      executions: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { id: true, status: true, startedAt: true, completedAt: true, createdAt: true }
+      }
     },
-    orderBy: { updatedAt: 'desc' },
+    orderBy: [
+      { isPinned: 'desc' },
+      { updatedAt: 'desc' },
+    ],
   });
+
+  // Optimize execution tracking logic for active workflows
+  const runningExecutions = workflows
+    .map(wf => wf.executions[0])
+    .filter(ex => ex && (ex.status === 'RUNNING' || ex.status === 'PENDING'))
+    .map(ex => ex!.id);
+
+  if (runningExecutions.length > 0) {
+    const activeExecs = await prisma.execution.findMany({
+      where: { id: { in: runningExecutions } },
+      select: { id: true, logs: true }
+    });
+    
+    workflows.forEach(wf => {
+      const execId = wf.executions[0]?.id;
+      const active = activeExecs.find(a => a.id === execId);
+      if (active && active.logs && Array.isArray(active.logs)) {
+        // Strip out huge output strings to prevent bandwidth blockages mapping it down to just names and statuses
+        (wf.executions[0] as any).logs = active.logs.map((l: any) => ({
+          agentName: l.agentName,
+          status: l.status
+        }));
+      }
+    });
+  }
 
   apiResponse({
     res,
@@ -136,10 +169,13 @@ export const getById = catchAsync(async (req: Request, res: Response) => {
       agents: { orderBy: { order: 'asc' } },
       executions: {
         orderBy: { createdAt: 'desc' },
-        take: 20, // Last 20 executions
+        take: 1, // Load the latest execution with full logs/results for the Execution Panel
         select: {
           id: true,
           status: true,
+          input: true,
+          result: true,
+          logs: true,
           startedAt: true,
           completedAt: true,
           createdAt: true,
@@ -271,5 +307,35 @@ export const remove = catchAsync(async (req: Request, res: Response) => {
   apiResponse({
     res,
     message: 'Workflow deleted successfully',
+  });
+});
+
+/**
+ * Toggle the pinned status of a workflow.
+ */
+export const togglePin = catchAsync(async (req: Request, res: Response) => {
+  const userId = requireUserId(req);
+  const workflowId = req.params.id as string;
+
+  // Verify ownership
+  const workflow = await prisma.workflow.findFirst({
+    where: { id: workflowId, userId },
+  });
+
+  if (!workflow) {
+    throw ApiError.notFound('Workflow not found.');
+  }
+
+  const updated = await prisma.workflow.update({
+    where: { id: workflowId },
+    data: { isPinned: !workflow.isPinned },
+  });
+
+  logger.info(`[Workflow] ${updated.isPinned ? 'Pinned' : 'Unpinned'} "${updated.name}" (${updated.id})`);
+
+  apiResponse({
+    res,
+    message: updated.isPinned ? 'Workflow pinned' : 'Workflow unpinned',
+    data: updated,
   });
 });

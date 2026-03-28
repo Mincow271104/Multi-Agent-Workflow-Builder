@@ -56,8 +56,44 @@ body {
 .react-flow__controls { background: var(--color-bg-card) !important; border: 1px solid var(--color-border) !important; border-radius: 8px; }
 .react-flow__controls button { background: var(--color-bg-card) !important; border-color: var(--color-border) !important; color: var(--color-text-secondary) !important; }
 .react-flow__controls button:hover { background: var(--color-bg-card-hover) !important; color: var(--color-text-primary) !important; }
-.react-flow__edge-path { stroke: var(--color-border-bright); stroke-width: 2; }
-.react-flow__handle { width: 10px !important; height: 10px !important; background: var(--color-accent) !important; border: 2px solid var(--color-bg-card) !important; }
+.react-flow__handle { width: 10px !important; height: 10px !important; border: 2px solid var(--color-bg-card) !important; }
+
+/* ── Pipeline Edge (cyan solid, animated dash flow) ──────────────── */
+
+.animated-pipeline {
+  stroke-dasharray: 12 4;
+  animation: pipeline-flow 1.2s linear infinite;
+}
+
+@keyframes pipeline-flow {
+  to { stroke-dashoffset: -16; }
+}
+
+/* ── Feedback Edge (amber dashed, subtle pulse) ──────────────────── */
+
+.animated-feedback {
+  animation: feedback-pulse 2s ease-in-out infinite;
+}
+
+@keyframes feedback-pulse {
+  0%, 100% { stroke-opacity: 1; }
+  50% { stroke-opacity: 0.5; }
+}
+
+/* ── Edge Labels ─────────────────────────────────────────────────── */
+
+.edge-label-feedback {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #f59e0b;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  backdrop-filter: blur(4px);
+}
 
 /* ── Glass card effect ──────────────────────────────────────────── */
 
