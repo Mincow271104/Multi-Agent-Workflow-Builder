@@ -17,8 +17,8 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import prisma from '../config/db';
 import { catchAsync, apiResponse, ApiError, logger } from '../utils';
-import { Orchestrator, WorkflowConfig } from '../services/orchestrator';
-import { getIO } from '../socket/socketManager';
+import { type WorkflowConfig } from '../services/orchestrator';
+import { getOrchestrator } from '../socket/socketManager';
 
 // ─── Zod Validation Schemas ─────────────────────────────────────
 
@@ -113,9 +113,8 @@ export const startExecution = catchAsync(async (req: Request, res: Response) => 
   });
 
   // 5. Trigger orchestrator in background (fire-and-forget)
-  //    Errors are caught inside and saved to the execution record.
-  const io = getIO();
-  const orchestrator = new Orchestrator(io);
+  //    Uses the SHARED orchestrator singleton so Stop button works
+  const orchestrator = getOrchestrator();
 
   orchestrator
     .execute(execution.id, workflowConfig, data.input)

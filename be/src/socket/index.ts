@@ -39,6 +39,7 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 import prisma from '../config/db';
 import { logger, verifyToken } from '../utils';
 import { Orchestrator, WorkflowConfig } from '../services/orchestrator';
+import { setOrchestrator } from './socketManager';
 
 // ─── Types — Socket Events ──────────────────────────────────────
 
@@ -210,6 +211,8 @@ export function setupSocket(httpServer: http.Server): TypedIO {
   //    typed event names for the frontend.
 
   orchestrator = new Orchestrator(io as unknown as SocketIOServer);
+  // Register into the shared singleton so REST controllers can access the same instance
+  setOrchestrator(orchestrator);
 
   // ── 3. JWT Authentication Middleware ────────────────────────────
   //    Every socket connection must provide a valid JWT token.
@@ -394,6 +397,12 @@ function handleStartExecution(io: TypedIO, socket: TypedSocket): void {
 function handleCancelExecution(socket: TypedSocket): void {
   socket.on('cancelExecution', ({ executionId }) => {
     logger.info(`[Socket] Cancel requested for execution ${executionId} by ${socket.data.userId}`);
+    orchestrator.cancel(executionId);
+  });
+  // Alias for frontend compatibility
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  socket.on('stopExecution' as any, ({ executionId }: any) => {
+    logger.info(`[Socket] Stop requested for execution ${executionId} by ${socket.data.userId}`);
     orchestrator.cancel(executionId);
   });
 }

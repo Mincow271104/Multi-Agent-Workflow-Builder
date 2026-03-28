@@ -45,6 +45,8 @@ export interface ChatCompletionConfig {
   temperature?: number;
   /** Maximum number of tokens to generate */
   maxTokens?: number;
+  /** Optional AbortSignal to cancel the request mid-flight */
+  signal?: AbortSignal;
 }
 
 /** Full response from non-streaming chat completion */
@@ -118,6 +120,7 @@ class OllamaStreamingProvider implements IStreamingAIProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: config.signal,
     });
 
     if (!response.ok) {
@@ -327,6 +330,7 @@ class GroqStreamingProvider implements IStreamingAIProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: config.signal,
     });
 
     if (!response.ok) {
@@ -436,6 +440,7 @@ class GeminiStreamingProvider implements IStreamingAIProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: config.signal,
     });
 
     if (!response.ok) {
@@ -509,6 +514,7 @@ class GeminiStreamingProvider implements IStreamingAIProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: config.signal,
     });
 
     if (!response.ok) {

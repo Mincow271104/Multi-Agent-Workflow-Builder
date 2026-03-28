@@ -7,8 +7,10 @@
 // ===================================================================
 
 import { Server as SocketIOServer } from 'socket.io';
+import { Orchestrator } from '../services/orchestrator';
 
 let io: SocketIOServer | null = null;
+let orchestratorInstance: Orchestrator | null = null;
 
 /**
  * Store the Socket.io server instance (called once during startup).
@@ -31,3 +33,23 @@ export function getIO(): SocketIOServer {
 }
 
 export default { setIO, getIO };
+
+/**
+ * Store the shared Orchestrator instance (called once during socket setup).
+ */
+export function setOrchestrator(instance: Orchestrator): void {
+  orchestratorInstance = instance;
+}
+
+/**
+ * Retrieve the shared Orchestrator instance.
+ * @throws If called before setOrchestrator().
+ */
+export function getOrchestrator(): Orchestrator {
+  if (!orchestratorInstance) {
+    throw new Error(
+      '[SocketManager] Orchestrator instance not initialized. Call setOrchestrator() first.',
+    );
+  }
+  return orchestratorInstance;
+}
