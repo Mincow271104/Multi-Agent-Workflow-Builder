@@ -35,6 +35,8 @@ interface WorkflowState {
   currentAgentId: string | null;
   finalResult: string;
   executionStartTime: number | null;
+  toastMessage: string | null;
+  setToastMessage: (msg: string | null) => void;
 
   // ── Canvas actions ───────────────────────────────────────────
   onNodesChange: (changes: NodeChange<Node<AgentNodeData>>[]) => void;
@@ -61,6 +63,17 @@ interface WorkflowState {
   setActiveTab: (tab: 'logs' | 'result') => void;
   hydrateExecution: (execution: Record<string, any>) => void;
   resetWorkflow: () => void;
+
+  // ── Hand Tracking ─────────────────────────────────────────────
+  isHandTrackingEnabled: boolean;
+  setHandTrackingEnabled: (enabled: boolean) => void;
+  handCursorPosition: { x: number; y: number } | null;
+  setHandCursorPosition: (pos: { x: number; y: number } | null) => void;
+  hoverClickProgress: number;
+  setHoverClickProgress: (progress: number) => void;
+  activeGesture: 'none' | 'point' | 'pinch_2' | 'pinch_3' | 'pinch_5' | 'open_palm' | 'fist' | 'scroll_up' | 'scroll_down';
+  setActiveGesture: (gesture: 'none' | 'point' | 'pinch_2' | 'pinch_3' | 'pinch_5' | 'open_palm' | 'fist' | 'scroll_up' | 'scroll_down') => void;
+  updateNodePosition: (nodeId: string, position: { x: number; y: number }) => void;
 }
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
@@ -78,6 +91,22 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   currentAgentId: null,
   finalResult: '',
   executionStartTime: null,
+  toastMessage: null,
+  setToastMessage: (msg: string | null) => {
+    set({ toastMessage: msg });
+    if (msg) {
+      setTimeout(() => {
+        if (get().toastMessage === msg) {
+          set({ toastMessage: null });
+        }
+      }, 5000);
+    }
+  },
+
+  isHandTrackingEnabled: localStorage.getItem('handTracking') === 'true',
+  handCursorPosition: null,
+  hoverClickProgress: 0,
+  activeGesture: 'none',
 
   // ── Canvas actions ───────────────────────────────────────────
 
@@ -95,8 +124,39 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const sourceNode = state.nodes.find((n) => n.id === connection.source);
     const targetNode = state.nodes.find((n) => n.id === connection.target);
 
+    // 1. Prohibit self-loops
+    if (connection.source === connection.target) {
+      state.setToastMessage("⚠️ Lỗi nối dây: Một Agent không thể tự nhận Data của chính mình!");
+      return;
+    }
+
     const sourceRole = (sourceNode?.data as AgentNodeData)?.role?.toLowerCase() || '';
     const targetRole = (targetNode?.data as AgentNodeData)?.role?.toLowerCase() || '';
+
+    // 2. Prohibit Orchestrator connections (except feedback logic if needed, but per user request, block it)
+    if (sourceRole === 'orchestrator' || targetRole === 'orchestrator') {
+      state.setToastMessage("⚠️ Sai kiến trúc: Hệ thống không cho phép nối dây với Orchestrator! Hãy để Orchestrator đứng lơ lửng độc lập.");
+      return;
+    }
+
+    // 3. Cycle Detection (DAG validation)
+    const hasPath = (current: string, destination: string, visited: Set<string>): boolean => {
+      if (current === destination) return true;
+      if (visited.has(current)) return false;
+      visited.add(current);
+      
+      const outs = state.edges.filter(e => e.source === current).map(e => e.target);
+      for (const out of outs) {
+        if (hasPath(out, destination, visited)) return true;
+      }
+      return false;
+    };
+
+    if (connection.source && connection.target && hasPath(connection.target, connection.source, new Set())) {
+      state.setToastMessage("⚠️ Vòng lặp vô tận: Không thể cắm dây ngược dòng (tạo thành vòng khép kín). Luồng kết nối phải luôn đi tới!");
+      return;
+    }
+
     const involvesOrchestrator = sourceRole === 'orchestrator' || targetRole === 'orchestrator';
 
     const edgeType = involvesOrchestrator ? 'feedback' : 'pipeline';
@@ -170,6 +230,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   onAgentStarted: ({ nodeId, agentName, role, provider, model }) =>
     set((s) => ({
       currentAgentId: nodeId,
+      agentOutputs: { ...s.agentOutputs, [nodeId]: '' },
       executionSteps: [
         ...s.executionSteps,
         {
@@ -192,13 +253,18 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set((s) => {
       const current = s.agentOutputs[nodeId] || '';
       const newOutput = current + chunk;
+      
+      const newSteps = [...s.executionSteps];
+      for (let i = newSteps.length - 1; i >= 0; i--) {
+        if (newSteps[i].nodeId === nodeId) {
+          newSteps[i] = { ...newSteps[i], status: 'streaming', output: newOutput };
+          break;
+        }
+      }
+
       return {
         agentOutputs: { ...s.agentOutputs, [nodeId]: newOutput },
-        executionSteps: s.executionSteps.map((step) =>
-          step.nodeId === nodeId
-            ? { ...step, status: 'streaming' as const, output: newOutput }
-            : step,
-        ),
+        executionSteps: newSteps,
         nodes: s.nodes.map((n) =>
           n.id === nodeId ? { ...n, data: { ...n.data, status: 'streaming' as const } } : n,
         ),
@@ -206,26 +272,32 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     }),
 
   onAgentFinished: ({ nodeId, agentName, role, output, durationMs }) =>
-    set((s) => ({
-      currentAgentId: null,
-      agentOutputs: { ...s.agentOutputs, [nodeId]: output },
-      executionSteps: s.executionSteps.map((step) =>
-        step.nodeId === nodeId
-          ? { ...step, status: 'completed' as const, output, durationMs }
-          : step,
-      ),
-      nodes: s.nodes.map((n) =>
-        n.id === nodeId
-          ? { ...n, data: { ...n.data, status: 'completed' as const, output } }
-          : n,
-      ),
-      // Track last completed agent output as finalResult candidate
-      finalResult: output,
-      executionLogs: [
-        ...s.executionLogs,
-        { nodeId, agentName, role, provider: 'ollama' as const, model: '', status: 'completed' as const, input: '', output, durationMs },
-      ],
-    })),
+    set((s) => {
+      const newSteps = [...s.executionSteps];
+      for (let i = newSteps.length - 1; i >= 0; i--) {
+        if (newSteps[i].nodeId === nodeId) {
+          newSteps[i] = { ...newSteps[i], status: 'completed', output, durationMs };
+          break;
+        }
+      }
+
+      return {
+        currentAgentId: null,
+        agentOutputs: { ...s.agentOutputs, [nodeId]: output },
+        executionSteps: newSteps,
+        nodes: s.nodes.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, status: 'completed' as const, output } }
+            : n,
+        ),
+        // Track last completed agent output as finalResult candidate
+        finalResult: output,
+        executionLogs: [
+          ...s.executionLogs,
+          { nodeId, agentName, role, provider: 'ollama' as const, model: '', status: 'completed' as const, input: '', output, durationMs },
+        ],
+      };
+    }),
 
   onExecutionCompleted: (_result, logs) =>
     set((s) => {
@@ -343,4 +415,24 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       finalResult: '',
       executionStartTime: null,
     }),
+
+  // ── Hand Tracking Logic ───────────────────────────────────────────
+
+  setHandTrackingEnabled: (enabled) => {
+    localStorage.setItem('handTracking', enabled.toString());
+    set({ isHandTrackingEnabled: enabled });
+  },
+
+  setHandCursorPosition: (pos) => set({ handCursorPosition: pos }),
+  
+  setHoverClickProgress: (progress) => set({ hoverClickProgress: progress }),
+
+  setActiveGesture: (gesture) => set({ activeGesture: gesture }),
+
+  updateNodePosition: (nodeId, position) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === nodeId ? { ...n, position } : n
+      ),
+    })),
 }));

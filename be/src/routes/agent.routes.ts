@@ -11,6 +11,9 @@ const router = Router();
 // All agent routes require authentication
 router.use(authenticate);
 
+/** POST   /api/v1/agents/generate-prompt         — Auto-generate a system prompt */
+router.post('/generate-prompt', agentController.generatePrompt);
+
 /** POST   /api/v1/agents                        — Create an agent        */
 router.post('/', agentController.create);
 

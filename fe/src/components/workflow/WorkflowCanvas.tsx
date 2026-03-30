@@ -16,6 +16,7 @@ import '@xyflow/react/dist/style.css';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import AgentNode from './AgentNode';
 import { PipelineEdge, FeedbackEdge } from './CustomEdge';
+import { useAgentTemplateStore } from '@/stores/agentTemplateStore';
 import type { AgentTemplate, AgentNodeData } from '@/types';
 
 // Register custom node types
@@ -28,18 +29,188 @@ const edgeTypes = {
 };
 
 export default function WorkflowCanvas() {
-  const { nodes, edges, onNodesChange, onEdgesChange, addNode, setSelectedNode } = useWorkflowStore();
-  const addEdge = useWorkflowStore((s) => s.addEdgeSmart);
+  const { nodes, edges, onNodesChange, onEdgesChange, addNode, setSelectedNode, toastMessage, setToastMessage } = useWorkflowStore();
+
+  // ── Hand Tracking Integration ──────────────────────────────────────────
+  const { templates } = useAgentTemplateStore();
+  const { isHandTrackingEnabled, handCursorPosition, activeGesture } = useWorkflowStore();
+  const draggedNodeIdRef = useRef<string | null>(null);
+  const draggedTemplateRoleRef = useRef<string | null>(null);
+  const connectNodeIdRef = useRef<string | null>(null);
+  const lastHandPosRef = useRef<{ x: number; y: number } | null>(null);
+  const [forceRender, setForceRender] = useState(0); // For forcing SVG line render if needed
+
+  useEffect(() => {
+    if (!handCursorPosition || !rfInstanceRef.current || !isHandTrackingEnabled) {
+       draggedNodeIdRef.current = null;
+       draggedTemplateRoleRef.current = null;
+       connectNodeIdRef.current = null;
+       return;
+    }
+
+    const flowPos = rfInstanceRef.current.screenToFlowPosition({
+      x: handCursorPosition.x,
+      y: handCursorPosition.y,
+    });
+    
+    const stateNodes = useWorkflowStore.getState().nodes;
+
+    if (activeGesture === 'pinch_2') {
+       connectNodeIdRef.current = null;
+       
+       if (!draggedNodeIdRef.current && !draggedTemplateRoleRef.current) {
+          const targetElement = document.elementFromPoint(handCursorPosition.x, handCursorPosition.y);
+          const templateEl = targetElement?.closest('[data-template-role]');
+          
+          if (templateEl) {
+             draggedTemplateRoleRef.current = templateEl.getAttribute('data-template-role');
+          } else {
+             let closest = null;
+             let minDist = 200;
+             for (const n of stateNodes) {
+                const centerX = n.position.x + 150;
+                const centerY = n.position.y + 75;
+                const dist = Math.sqrt(Math.pow(centerX - flowPos.x, 2) + Math.pow(centerY - flowPos.y, 2));
+                if (dist < minDist) { minDist = dist; closest = n.id; }
+             }
+             if (closest) draggedNodeIdRef.current = closest;
+          }
+       } else if (draggedNodeIdRef.current) {
+          useWorkflowStore.getState().updateNodePosition(draggedNodeIdRef.current, { x: flowPos.x - 150, y: flowPos.y - 75 });
+       }
+       
+       if (draggedTemplateRoleRef.current) {
+          setForceRender(prev => prev + 1); // trigger ghost re-render
+       }
+    } else {
+       if (draggedTemplateRoleRef.current) {
+          const role = draggedTemplateRoleRef.current;
+          
+          // Must fetch latest templates to ensure custom agents are recognized by hand tracking
+          const template = useAgentTemplateStore.getState().templates.find(t => t.role === role);
+          
+          if (template && handCursorPosition.x > 224) { // Only drop if over the canvas area
+             const newNode = {
+               id: `agent_${Date.now()}`,
+               type: 'agentNode',
+               position: { x: flowPos.x - 150, y: flowPos.y - 75 },
+               data: {
+                 label: template.label,
+                 role: template.role,
+                 provider: template.defaultProvider || 'ollama',
+                 model: template.defaultModel || 'qwen2.5:14b',
+                 systemPrompt: template.defaultPrompt || '',
+                 temperature: template.defaultTemperature ?? 0.7,
+                 maxTokens: 2048,
+                 status: 'idle',
+                 isLocked: template.role !== 'custom',
+               }
+             };
+             useWorkflowStore.getState().addNode(newNode as any);
+          }
+          draggedTemplateRoleRef.current = null;
+          setForceRender(prev => prev + 1); 
+       }
+       draggedNodeIdRef.current = null;
+    }
+
+    if (activeGesture === 'pinch_3') {
+       if (!connectNodeIdRef.current) {
+          let closest = null;
+          let minDist = 200;
+          for (const n of stateNodes) {
+             const centerX = n.position.x + 150;
+             const centerY = n.position.y + 75;
+             const dist = Math.sqrt(Math.pow(centerX - flowPos.x, 2) + Math.pow(centerY - flowPos.y, 2));
+             if (dist < minDist) { minDist = dist; closest = n.id; }
+          }
+          if (closest) connectNodeIdRef.current = closest;
+       }
+       // Force a render so the SVG line updates to follow the hand cursor
+       setForceRender(prev => prev + 1);
+    } else if (connectNodeIdRef.current) {
+       let closest = null;
+       let minDist = 200;
+       for (const n of stateNodes) {
+         if (n.id === connectNodeIdRef.current) continue;
+         const centerX = n.position.x + 150;
+         const centerY = n.position.y + 75;
+         const dist = Math.sqrt(Math.pow(centerX - flowPos.x, 2) + Math.pow(centerY - flowPos.y, 2));
+         if (dist < minDist) { minDist = dist; closest = n.id; }
+       }
+       if (closest) {
+         useWorkflowStore.getState().addEdgeSmart({
+           source: connectNodeIdRef.current,
+           target: closest,
+           sourceHandle: 'bottom',
+           targetHandle: 'top'
+         } as any);
+       }
+       connectNodeIdRef.current = null;
+    }
+
+    // ── Pan and Zoom ──────────────────────────────────────────────────────────
+    if (activeGesture === 'fist') {
+       if (lastHandPosRef.current && rfInstanceRef.current) {
+          const dx = handCursorPosition.x - lastHandPosRef.current.x;
+          const dy = handCursorPosition.y - lastHandPosRef.current.y;
+          const currentViewport = rfInstanceRef.current.getViewport();
+          rfInstanceRef.current.setViewport({
+             ...currentViewport,
+             x: currentViewport.x + dx,
+             y: currentViewport.y + dy,
+          });
+       }
+       lastHandPosRef.current = { ...handCursorPosition };
+    } else {
+       lastHandPosRef.current = null;
+    }
+
+    if (activeGesture === 'open_palm') {
+       if (rfInstanceRef.current) {
+          const vp = rfInstanceRef.current.getViewport();
+          const newZoom = Math.min(Math.max(vp.zoom + 0.008, 0.1), 2.5);
+          
+          const rect = document.querySelector('.react-flow')?.getBoundingClientRect();
+          if (rect) {
+             const mouseX = handCursorPosition.x - rect.left;
+             const mouseY = handCursorPosition.y - rect.top;
+             const multiplier = newZoom / vp.zoom;
+             rfInstanceRef.current.setViewport({ 
+                x: mouseX - (mouseX - vp.x) * multiplier, 
+                y: mouseY - (mouseY - vp.y) * multiplier, 
+                zoom: newZoom 
+             });
+          }
+       }
+    }
+
+    if (activeGesture === 'pinch_5') {
+       if (rfInstanceRef.current) {
+          const vp = rfInstanceRef.current.getViewport();
+          const newZoom = Math.max(vp.zoom - 0.008, 0.1);
+          
+          const rect = document.querySelector('.react-flow')?.getBoundingClientRect();
+          if (rect) {
+             const mouseX = handCursorPosition.x - rect.left;
+             const mouseY = handCursorPosition.y - rect.top;
+             const multiplier = newZoom / vp.zoom;
+             rfInstanceRef.current.setViewport({ 
+                x: mouseX - (mouseX - vp.x) * multiplier, 
+                y: mouseY - (mouseY - vp.y) * multiplier, 
+                zoom: newZoom 
+             });
+          }
+       }
+    }
+    // ────────────────────────────────────────────────────────────────────────
+  }, [handCursorPosition, activeGesture, isHandTrackingEnabled]);
+  // ───────────────────────────────────────────────────────────────────────
+
   const resetWorkflow = useWorkflowStore((s) => s.resetWorkflow);
   const rfWrapper = useRef<HTMLDivElement>(null);
-  const rfInstanceRef = useRef<{ screenToFlowPosition: (pos: {x: number; y: number}) => {x: number; y: number} } | null>(null);
+  const rfInstanceRef = useRef<any>(null);
   const { id } = useParams<{ id: string }>();
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-  const showToast = useCallback((msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 5000);
-  }, []);
 
   // Clear workflow state entirely when unmounting or switching to another workflow
   useEffect(() => {
@@ -90,46 +261,12 @@ export default function WorkflowCanvas() {
     [addNode],
   );
 
-  // Smart connect: auto-detect edge type based on source/target roles & block invalid connections
+  // Connect nodes using the store's addEdgeSmart (which contains validation)
   const onConnect = useCallback(
     (connection: Connection) => {
-      const sourceNode = nodes.find((n) => n.id === connection.source);
-      const targetNode = nodes.find((n) => n.id === connection.target);
-      const sourceRole = (sourceNode?.data as AgentNodeData)?.role?.toLowerCase() || '';
-      const targetRole = (targetNode?.data as AgentNodeData)?.role?.toLowerCase() || '';
-
-      if (sourceRole === 'orchestrator' || targetRole === 'orchestrator') {
-        showToast("⚠️ Sai kiến trúc: Hệ thống không cho phép nối dây với Orchestrator! Hãy để Orchestrator đứng lơ lửng độc lập (chế độ giám sát Hybrid), hoặc xóa tất cả dây (chế độ động Dynamic).");
-        return;
-      }
-
-      // Check self-loop
-      if (connection.source === connection.target) {
-        showToast("⚠️ Lỗi nối dây: Một Agent không thể tự nhận Data của chính mình!");
-        return;
-      }
-
-      // Detect cycles (DAG validation)
-      const hasPath = (current: string, destination: string, visited: Set<string>): boolean => {
-        if (current === destination) return true;
-        if (visited.has(current)) return false;
-        visited.add(current);
-        
-        const outs = edges.filter(e => e.source === current).map(e => e.target);
-        for (const out of outs) {
-          if (hasPath(out, destination, visited)) return true;
-        }
-        return false;
-      };
-
-      if (connection.source && connection.target && hasPath(connection.target, connection.source, new Set())) {
-        showToast("⚠️ Vòng lặp vô tận: Không thể cắm dây ngược dòng (tạo thành vòng khép kín). Luồng kết nối phải luôn đi tới (Linear)!");
-        return;
-      }
-
-      addEdge(connection);
+      useWorkflowStore.getState().addEdgeSmart(connection);
     },
-    [nodes, edges, addEdge, showToast],
+    [],
   );
 
   const [connectingHandle, setConnectingHandle] = useState<{
@@ -179,6 +316,47 @@ export default function WorkflowCanvas() {
           <span>{toastMessage}</span>
         </div>
       )}
+
+      {/* Hand Tracking Edge Connector & Drag Outline */}
+      {isHandTrackingEnabled && (
+        <>
+          {connectNodeIdRef.current && handCursorPosition && rfInstanceRef.current && (
+             <svg className="fixed top-0 left-0 w-full h-full pointer-events-none z-[40]">
+               {(() => {
+                 const el = document.querySelector(`[data-id="${connectNodeIdRef.current}"]`);
+                 if (!el) return null;
+                 const rect = el.getBoundingClientRect();
+                 const startX = rect.left + rect.width / 2;
+                 const startY = rect.bottom;
+                 
+                 return (
+                   <path 
+                     d={`M ${startX} ${startY}` +
+                       ` C ${startX} ${(startY + handCursorPosition.y)/2},` +
+                       ` ${handCursorPosition.x} ${(startY + handCursorPosition.y)/2},` + 
+                       ` ${handCursorPosition.x} ${handCursorPosition.y}`
+                     }
+                     fill="none" stroke="var(--color-success)" strokeWidth="3" strokeDasharray="5,5" className="animate-pulse"
+                   />
+                 );
+               })()}
+             </svg>
+          )}
+
+          {/* Ghost Agent Template Dragging */}
+          {draggedTemplateRoleRef.current && handCursorPosition && (
+            <div 
+              className="fixed pointer-events-none z-[90] opacity-70 glass-card bg-[var(--color-bg-card)] border border-[var(--color-accent)] rounded-xl flex items-center justify-center shadow-2xl px-4 py-2"
+              style={{ left: handCursorPosition.x, top: handCursorPosition.y, transform: 'translate(-50%, -50%)', width: 250 }}
+            >
+               <span className="font-bold text-sm text-[var(--color-accent)] animate-pulse">
+                 Dropping {templates.find((t: AgentTemplate) => t.role === draggedTemplateRoleRef.current)?.label || 'Agent'}...
+               </span>
+            </div>
+          )}
+        </>
+      )}
+
       <ReactFlow<Node<AgentNodeData>, Edge>
         nodes={nodes}
         edges={edges}

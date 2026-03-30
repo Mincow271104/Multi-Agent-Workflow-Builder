@@ -18,7 +18,7 @@ import { z } from 'zod';
 import prisma from '../config/db';
 import { catchAsync, apiResponse, ApiError, logger } from '../utils';
 import { type WorkflowConfig } from '../services/orchestrator';
-import { getOrchestrator } from '../socket/socketManager';
+import { getOrchestrator, getIO } from '../socket/socketManager';
 
 // ─── Zod Validation Schemas ─────────────────────────────────────
 
@@ -122,11 +122,31 @@ export const startExecution = catchAsync(async (req: Request, res: Response) => 
       logger.info(
         `[Execution] ${execution.id} completed with status: ${result.status}`,
       );
+      
+      // Emit the socket event to manually unstick the frontend UI
+      const io = getIO();
+      if (io) {
+        io.to(`workflow:${data.workflowId}`).emit('executionCompleted', {
+          executionId: execution.id,
+          result: (result.result as Record<string, unknown>) || {},
+          logs: (result.logs as Record<string, unknown>[]) || [],
+          timestamp: new Date().toISOString(),
+        });
+      }
     })
     .catch((error) => {
       logger.error(
         `[Execution] ${execution.id} unhandled error: ${error.message}`,
       );
+
+      const io = getIO();
+      if (io) {
+        io.to(`workflow:${data.workflowId}`).emit('executionError', {
+          executionId: execution.id,
+          error: error.message,
+          timestamp: new Date().toISOString(),
+        });
+      }
     });
 });
 

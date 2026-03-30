@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { workflowApi } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
+import { useWorkflowStore } from '@/stores/workflowStore';
 import type { Workflow } from '@/types';
-import { Plus, Trash2, Bot, LogOut, Clock, Layers, Pin } from 'lucide-react';
+import { Plus, Trash2, Bot, LogOut, Clock, Layers, Pin, Hand } from 'lucide-react';
 
 export default function DashboardPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -11,6 +12,7 @@ export default function DashboardPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const { user, logout } = useAuthStore();
+  const { isHandTrackingEnabled, setHandTrackingEnabled } = useWorkflowStore();
   const navigate = useNavigate();
 
   const loadWorkflows = async (showLoading = true) => {
@@ -121,7 +123,28 @@ export default function DashboardPage() {
             <p className="text-xs text-[var(--color-text-muted)]">Multi-Agent Orchestration Platform</p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
+          {/* Hand Tracking Toggle */}
+          <div className="flex items-center gap-2 border-r border-[var(--color-border)] pr-4">
+            <span className="text-xs font-semibold text-[var(--color-text-muted)] flex items-center gap-1.5 hidden sm:flex">
+              <Hand size={14} className={isHandTrackingEnabled ? "text-[var(--color-accent)] animate-pulse" : ""} />
+              Hand Tracking
+            </span>
+            <button
+              onClick={() => setHandTrackingEnabled(!isHandTrackingEnabled)}
+              className={`relative flex h-5 w-9 items-center rounded-full transition-colors ${
+                isHandTrackingEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-bg-input)] hover:bg-[var(--color-border)]'
+              }`}
+              title={isHandTrackingEnabled ? 'Tắt Hand Tracking' : 'Bật theo dõi tay rảnh (Hand Tracking)'}
+            >
+              <span
+                className={`absolute h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                  isHandTrackingEnabled ? 'translate-x-4.5' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
           <span className="text-sm text-[var(--color-text-secondary)]">Welcome, {user?.name}</span>
           <button
             onClick={() => { logout(); navigate('/login'); }}

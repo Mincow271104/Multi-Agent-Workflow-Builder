@@ -57,6 +57,8 @@ export const workflowApi = {
 // ── Agents ──────────────────────────────────────────────────────
 
 export const agentApi = {
+  generatePrompt: (data: { role: string; provider: string; model: string }) =>
+    api.post<ApiResponse<{ prompt: string }>>('/agents/generate-prompt', data).then((r) => r.data),
   create: (data: Partial<Agent> & { workflowId: string }) =>
     api.post<ApiResponse<Agent>>('/agents', data).then((r) => r.data),
   getByWorkflow: (workflowId: string) =>

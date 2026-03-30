@@ -99,6 +99,89 @@ export function parseAgentOutput(output: string): ParsedAgentOutput {
   return result;
 }
 
+// ══════════════════════════════════════════════════════════════
+// ██ NEW: AUTONOMOUS REFLECTION PROTOCOL PARSERS
+// ══════════════════════════════════════════════════════════════
+
+export interface OrchestratorPlanStep {
+  agentName: string;
+  taskScoping: string;
+}
+
+export interface OrchestratorPlan {
+  plan: OrchestratorPlanStep[];
+}
+
+export function parseOrchestratorPlan(output: string): OrchestratorPlanStep[] {
+  try {
+    const codeBlockRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/i;
+    const match = output.match(codeBlockRegex);
+    let rawJson = match && match[1] ? match[1] : output;
+    
+    if (!match) {
+       const firstBrace = output.indexOf('{');
+       const lastBrace = output.lastIndexOf('}');
+       if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+         rawJson = output.substring(firstBrace, lastBrace + 1);
+       }
+    }
+    
+    const parsed = JSON.parse(rawJson);
+    if (parsed && Array.isArray(parsed.plan)) {
+      if (typeof parsed.plan[0] === 'string') {
+         return parsed.plan.map((name: string) => ({ agentName: name, taskScoping: '' }));
+      }
+      return parsed.plan;
+    }
+  } catch (err) {
+    logger.error('[Parser] Failed to parse Orchestrator plan:', err);
+  }
+  return [];
+}
+
+export interface AgentReflectionOutput {
+  status: 'APPROVED' | 'REJECTED';
+  feedback: string;
+  content: string;
+}
+
+export function parseAgentReflection(output: string): AgentReflectionOutput {
+  const fallback: AgentReflectionOutput = {
+    status: 'APPROVED',
+    feedback: '',
+    content: output
+  };
+
+  try {
+    const codeBlockRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/i;
+    const match = output.match(codeBlockRegex);
+    let rawJson = match && match[1] ? match[1] : output;
+    
+    if (!match) {
+       const firstBrace = output.indexOf('{');
+       const lastBrace = output.lastIndexOf('}');
+       if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+         rawJson = output.substring(firstBrace, lastBrace + 1);
+       } else {
+         return fallback; // No JSON found, assume raw output
+       }
+    }
+    
+    const parsed = JSON.parse(rawJson);
+    if (parsed && parsed.status) {
+      return {
+        status: parsed.status === 'REJECTED' ? 'REJECTED' : 'APPROVED',
+        feedback: parsed.feedback || '',
+        content: parsed.content || output
+      };
+    }
+  } catch (err) {
+    logger.warn('[Parser] Failed to parse Agent Reflection JSON. Falling back to raw content.');
+  }
+  
+  return fallback;
+}
+
 export function extractOrchestratorContent(outputText: string): { status: string; forwardContent: string } {
   // Splitting Orchestrator Status from the actual payload content to forward
   const parts = outputText.split('=== END STATUS ===');

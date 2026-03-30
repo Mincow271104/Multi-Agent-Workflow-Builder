@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Save, Play, Plus, LogOut, Loader2, ChevronDown, Square, Search, Pin } from 'lucide-react';
+import { Save, Play, Plus, LogOut, Loader2, ChevronDown, Square, Search, Pin, Hand } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { useWorkflowStore } from '@/stores/workflowStore';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -16,7 +16,7 @@ interface TopBarProps {
 
 export default function TopBar({ workflowName, onSave, onRun, isSaving }: TopBarProps) {
   const { user, logout } = useAuthStore();
-  const { isRunning, executionId, setShowExecution } = useWorkflowStore();
+  const { isRunning, executionId, setShowExecution, isHandTrackingEnabled, setHandTrackingEnabled } = useWorkflowStore();
   const [isStopping, setIsStopping] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -55,7 +55,7 @@ export default function TopBar({ workflowName, onSave, onRun, isSaving }: TopBar
   const handleStop = () => {
     if (isStopping) return;
     setIsStopping(true);
-    setShowExecution(false); 
+    // Removed: setShowExecution(false) so the user can continue reading the stopped logs
     const socket = getSocket();
     if (socket && executionId) {
       socket.emit('stopExecution', { executionId });
@@ -248,8 +248,33 @@ export default function TopBar({ workflowName, onSave, onRun, isSaving }: TopBar
         )}
       </div>
 
-      {/* Right — User */}
+      {/* Right — User & Features */}
       <div className="flex items-center gap-3">
+        
+        {/* Hand Tracking Toggle */}
+        <button
+          onClick={() => setHandTrackingEnabled(!isHandTrackingEnabled)}
+          className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-all duration-300 ${
+            isHandTrackingEnabled 
+              ? 'border-transparent bg-[var(--color-success)]/10 text-[var(--color-success)] hover:bg-[var(--color-success)]/20 shadow-[0_0_12px_var(--color-success)]/20' 
+              : 'border-[var(--color-border)] bg-[var(--color-bg-card)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border-bright)]'
+          }`}
+          title={isHandTrackingEnabled ? "Turn off Hand Tracking" : "Turn on Hand Tracking"}
+        >
+          <div className="relative flex items-center justify-center">
+            <Hand size={14} className={isHandTrackingEnabled ? 'animate-pulse' : ''} />
+            {isHandTrackingEnabled && (
+               <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
+                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-success)] opacity-75"></span>
+                 <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-success)]"></span>
+               </span>
+            )}
+          </div>
+          {isHandTrackingEnabled ? 'Hand Tracking ON' : 'Hand Tracking OFF'}
+        </button>
+
+        <div className="h-4 w-[1px] bg-[var(--color-border)] mx-1" />
+
         <span className="text-xs text-[var(--color-text-muted)]">{user?.email}</span>
         <button
           onClick={() => { logout(); navigate('/login'); }}

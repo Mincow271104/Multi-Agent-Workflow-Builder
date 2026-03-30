@@ -284,14 +284,5 @@ Message to user: [Exact copy-paste instructions for the user]
 
 Strict Rules: Always clear, professional, and flexible. Support any agent order and any custom agents added by the user.`,
     color: '#ef4444',
-  },
-  {
-    role: 'custom',
-    label: 'Custom Agent',
-    icon: '🤖',
-    defaultProvider: 'ollama',
-    defaultModel: 'qwen2.5:14b',
-    defaultPrompt: 'Nhập System Prompt tùy chỉnh cho agent này...',
-    color: '#6366f1',
-  },
+  }
 ];

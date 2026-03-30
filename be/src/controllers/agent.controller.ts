@@ -6,6 +6,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { catchAsync, apiResponse } from '../utils';
 import * as agentService from '../services/agent.service';
+import { getAIProvider } from '../services/ai/ai-provider.factory';
 
 // ─── Validation Schemas ───────────────────────────────────────────
 
@@ -17,6 +18,12 @@ const createAgentSchema = z.object({
   config: z.record(z.unknown()).optional(),
   order: z.number().int().min(0).optional(),
   workflowId: z.string().uuid('Invalid workflow ID'),
+});
+
+const generatePromptSchema = z.object({
+  role: z.string().min(1, 'Role is required'),
+  provider: z.enum(['OLLAMA', 'GROQ', 'GEMINI']),
+  model: z.string().min(1, 'Model is required'),
 });
 
 const updateAgentSchema = z.object({
@@ -36,6 +43,50 @@ export const create = catchAsync(async (req: Request, res: Response) => {
   const agent = await agentService.createAgent(data);
 
   apiResponse({ res, statusCode: 201, message: 'Agent created', data: agent });
+});
+
+/** POST /api/v1/agents/generate-prompt */
+export const generatePrompt = catchAsync(async (req: Request, res: Response) => {
+  const { role, provider, model } = generatePromptSchema.parse(req.body);
+
+  const metaPrompt = `You are an expert AI Architect. Your task is to write a System Prompt for a new AI Agent. The agent's role is: "${role}".
+
+CRITICAL INSTRUCTIONS:
+1. Write a complete System Prompt instructing the agent on its core expertise, tone, and step-by-step methodologies based strictly on the role "${role}".
+2. Start the prompt with "You are an expert ${role}...".
+3. You MUST append the following "Output Format" rules EXACTLY as written below at the end of your generated System Prompt. This ensures the agent complies with the system's JSON Reflection Protocol.
+4. DO NOT return a JSON object yourself. You are writing the INSTRUCTIONS that the agent will receive.
+5. Do NOT wrap your response in markdown code blocks. Just return the raw text of the System Prompt you created.
+
+--- REQUIRED OUTPUT FORMAT RULES TO INCLUDE AT THE END OF THE CACHED PROMPT ---
+OUTPUT FORMAT:
+You must return your entire response as a SINGLE, VALID JSON OBJECT.
+Do NOT wrap the JSON in markdown blocks like \`\`\`json.
+Do NOT return anything outside the JSON object.
+
+The JSON object must strictly follow this schema:
+{
+  "thoughts": "Your detailed reasoning process, step-by-step logic, and analysis.",
+  "status": "APPROVED" | "REJECTED",
+  "feedback": "If rejecting previous inputs, state why. If approved, leave empty or say 'Looks good'.",
+  "quality_score": <number between 1-10>,
+  "content": "Your final, polished output or result here."
+}
+--------------------------------------------------------------`;
+
+  const llm = getAIProvider(provider);
+  const response = await llm.chat({
+    model,
+    messages: [
+      { role: 'system', content: 'You are an AI Architect building system prompts.' },
+      { role: 'user', content: metaPrompt }
+    ],
+    temperature: 0.7,
+  });
+
+  const generatedPrompt = response.content.replace(/^\`\`\`[a-z]*\n/i, '').replace(/\n\`\`\`$/, '').trim();
+
+  apiResponse({ res, statusCode: 200, message: 'Prompt generated successfully', data: { prompt: generatedPrompt } });
 });
 
 /** GET /api/v1/agents/workflow/:workflowId */

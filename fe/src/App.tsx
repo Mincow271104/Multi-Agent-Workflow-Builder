@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/authStore';
 import LoginPage from '@/components/auth/LoginPage';
 import DashboardPage from '@/components/dashboard/DashboardPage';
 import WorkflowPage from '@/pages/WorkflowPage';
+import GlobalHandTracking from '@/components/common/GlobalHandTracking';
 
 // Protected route wrapper
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -21,6 +22,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      <GlobalHandTracking />
       <Routes>
         <Route path="/login" element={
           isAuthenticated ? <Navigate to="/" replace /> : <LoginPage />

@@ -46,7 +46,7 @@ export default function PropertiesPanel() {
       </div>
 
       {/* Form */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div id="agent-properties-scroll" className="flex-1 overflow-y-auto p-4">
         <div className="flex flex-col gap-4">
           {/* Name */}
           <Field label="Agent Name">
@@ -137,6 +137,7 @@ export default function PropertiesPanel() {
           {/* Temperature */}
           <Field label={`Temperature (${data.temperature ?? 0.7})`}>
             <input
+              id="temp-slider"
               type="range"
               min={0}
               max={2}

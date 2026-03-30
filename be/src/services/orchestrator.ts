@@ -3,7 +3,7 @@ import prisma from '../config/db';
 import { logger } from '../utils';
 import { ServerEvents } from '../models/types';
 import { getAIProvider, type ProviderName, type ChatMessage } from './aiProviders';
-import { parseAgentOutput, extractOrchestratorContent } from './agentOutputParser';
+import { parseAgentOutput, parseOrchestratorPlan, parseAgentReflection } from './agentOutputParser';
 
 export interface WorkflowNode {
   id: string;
@@ -138,89 +138,138 @@ export class Orchestrator {
     memory: SharedMemory,
     stepLogs: AgentStepLog[]
   ) {
-    const MAX_LOOPS = 12;
-    let loopCount = 0;
-
-    // Remove Orchestrator from available payload agents to prevent it from calling itself
     const availableAgents = nodes.filter(n => n.id !== orchestratorNode.id);
+    if (availableAgents.length === 0) {
+      logger.warn('[Dynamic Orchestrator] No available agents to execute.');
+      return;
+    }
 
-    // Initial payload sent to Orchestrator
-    let currentPayloadToOrch = JSON.stringify({
-      source: "User",
-      topic: memory.userInput
-    });
+    const availableAgentNames = availableAgents.map(a => `"${a.data.label}" (Role: ${a.data.role || 'General'})`).join(', ');
 
-    while (loopCount < MAX_LOOPS) {
-      loopCount++;
-      logger.info(`[Dynamic Orchestrator] Loop ${loopCount} starting...`);
+    // ── PHASE 1: Orchestrator Path Planning ──
+    logger.info(`[Dynamic Orchestrator] Phase 1 - Planning Sequence`);
+    const planPrompt = `USER DIRECTIVE: ${memory.userInput}\n\nAVAILABLE AGENTS: [${availableAgentNames}]\n\nYOUR TASK: You are the Chief Orchestrator. Break down the USER DIRECTIVE into distinct chronological steps. Assign EACH step to the most appropriate agent from the AVAILABLE AGENTS list.\n\nCRITICAL RULES:\n1. You MUST use as many different available agents as necessary. Do not overload one agent with multiple distinct roles (e.g., if writing and translating are needed, assign Writer then Translator).\n2. For each agent, you MUST define a strict "taskScoping" instruction. Tell them exactly what their isolated sub-task is. End it with explicit boundary warnings like "Do not do X. Leave X for the next agent."\n\nYou MUST respond with EXACTLY this JSON format and nothing else:\n\`\`\`json\n{\n  "thoughts": "Step 1 is X -> assigned to A. Step 2 is Y -> assigned to B...",\n  "plan": [\n    {\n      "agentName": "Exact Name of the Agent in quotes (DO NOT write the Role here)",\n      "taskScoping": "Your specific task is X. Do NOT do Y. Leave Y for the next agent."\n    }\n  ]\n}\n\`\`\``;
+
+    const orchResponse = await this.executeAgent(
+      executionId, workflowId, orchestratorNode,
+      planPrompt,
+      memory, stepLogs
+    );
+
+    let dynamicPlan = parseOrchestratorPlan(orchResponse);
+
+    if (!dynamicPlan || dynamicPlan.length === 0) {
+      logger.warn('[Dynamic Orchestrator] Failed to parse a valid plan from Orchestrator. Falling back to all agents.');
+      dynamicPlan = availableAgents.map(a => ({ agentName: a.data.label, taskScoping: 'Please execute your specific role.' }));
+    }
+    
+    // Map names back to actual Node objects
+    const executionSequence: { node: WorkflowNode; taskScoping: string }[] = dynamicPlan
+      .map(step => {
+         const node = availableAgents.find(a => a.data.label.toLowerCase() === step.agentName.toLowerCase());
+         return node ? { node, taskScoping: step.taskScoping } : undefined;
+      })
+      .filter((n): n is { node: WorkflowNode; taskScoping: string } => n !== undefined);
+
+    if (executionSequence.length === 0) {
+      logger.warn('[Dynamic Orchestrator] Plan resulted in no matched agents. Aborting.');
+      return;
+    }
+
+    logger.info(`[Dynamic Orchestrator] Plan established: ${executionSequence.map(a => a.node.data.label).join(' -> ')}`);
+
+    // ── PHASE 2: State Machine Ping-Pong Execution ──
+    let currentStepIndex = 0;
+    const MAX_REVISIONS = 5;
+    let revisionsCount = 0;
+    
+    let workingContent = memory.userInput;
+    let currentFeedback = '';
+
+    while (currentStepIndex < executionSequence.length) {
       if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
-
-      // 1. Execute Orchestrator
-      const isFirstLoop = loopCount === 1;
-      const availableAgentNames = availableAgents.map(a => a.data.label).join(', ');
       
-      let orchPrompt = `AVAILABLE AGENTS TO ROUTE TO: [${availableAgentNames}]\n\nIncoming payload to evaluate:\n\n${currentPayloadToOrch}`;
-      if (isFirstLoop) {
-         orchPrompt += `\n\nYOUR TASK: This is the initial topic from the User. You must start the workflow by choosing the best first agent (typically Researcher). Output your exact MANDATORY format.\nUse the EXACT JSON format below at the end of your response to forward the content:\n` +
-         `\`\`\`json\n{\n  "next_agent": "AgentName",\n  "content": "Topic Prompt forwarded for you to work on: ..."\n}\n\`\`\``;
+      const isFirstAgent = currentStepIndex === 0;
+      const { node: agentNode, taskScoping } = executionSequence[currentStepIndex];
+      const previousAgentNode = currentStepIndex > 0 ? executionSequence[currentStepIndex - 1].node : null;
+
+      logger.info(`[Dynamic Orchestrator] Executing Agent at Step ${currentStepIndex} (${agentNode.data.label})`);
+
+      let agentPrompt = '';
+      if (isFirstAgent) {
+        agentPrompt = `--- YOUR STRICT TASK SCOPING ---\n${taskScoping || 'Please fulfill your role based on the directive.'}\n\n(Background Context - Original User Directive: ${memory.userInput})\n\n`;
+        if (currentFeedback) {
+           agentPrompt += `⚠️ MESSAGE FROM ORCHESTRATOR:\n${currentFeedback}\n\nPlease revise your work accordingly.`;
+        }
+        agentPrompt += `\n\nSince you are the first agent, output ONLY your final result as plain text without any JSON envelope. YOU MUST OBEY YOUR STRICT TASK SCOPING ABOVE. Do NOT attempt to fulfill the entire Original User Directive.\n\nCRITICAL LANGUAGE RULE: Your output MUST be in English unless your task explicitly commands otherwise.`;
       } else {
-         orchPrompt += `\n\nYOUR TASK: Review the agent's output above. If it needs revision, set needs_revision=true and revision_to="AgentName". If it's good, set next_agent="NextAgentName". If the workflow is completely finished, set next_agent=null.\nOutput your MUST-HAVE format.`;
+        agentPrompt = `--- YOUR STRICT TASK SCOPING ---\n${taskScoping || 'Please perform your role on the previous output.'}\n\n(Background Context - Original User Directive: ${memory.userInput})\n\n`;
+        agentPrompt += `--- OUTPUT FROM PREVIOUS AGENT (${previousAgentNode?.data.label}) ---\n${workingContent}\n\n`;
+        
+        if (currentFeedback) {
+           agentPrompt += `⚠️ MESSAGE FROM ORCHESTRATOR:\n${currentFeedback}\n\nPlease revise your work.\n\n`;
+        }
+
+        agentPrompt += `YOUR TASK:\nEvaluate the previous agent's output. If it severely violates the Original Directive, REJECT it and provide feedback. If it is acceptable, perform your specific role on it and APPROVE it.\n\nWARNING: YOU MUST OBEY YOUR STRICT TASK SCOPING ABOVE! Do NOT attempt to fulfill downstream steps of the Original Directive. Leave them for the next agents.\n\nCRITICAL LANGUAGE RULE: Your internal thinking and JSON output MUST be in English. ONLY translate the final content if your taskScoping explicitly instructs you to do so.\n\nYou MUST respond at the end of your message with exactly this JSON format:\n\`\`\`json\n{\n  "status": "APPROVED" | "REJECTED",\n  "feedback": "Reason for rejection or brief note if approved.",\n  "content": "The full, complete content that the NEXT agent will need. Do NOT leave this empty unless you are rejecting. You must include the full valid text here."\n}\n\`\`\``;
       }
-
-      const orchResponse = await this.executeAgent(
-        executionId, workflowId, orchestratorNode, 
-        orchPrompt, 
-        memory, stepLogs
-      );
-
-      const { status, forwardContent } = extractOrchestratorContent(orchResponse);
-      const parsedForward = parseAgentOutput(forwardContent);
-
-      // 2. Determine Next Agent Target
-      let targetAgentName: string | null = null;
-      let targetPayload = forwardContent;
-
-      if (parsedForward.needs_revision && parsedForward.revision_to && parsedForward.revision_to !== 'none' && parsedForward.revision_to !== 'null') {
-        targetAgentName = parsedForward.revision_to;
-        targetPayload = `⚠️ REVISION REQUEST FROM ORCHESTRATOR:\n${status}\n\nYour previous output:\n${forwardContent}`;
-      } else if (parsedForward.next_agent && parsedForward.next_agent !== 'none' && parsedForward.next_agent !== 'null') {
-        targetAgentName = parsedForward.next_agent;
-      }
-
-      // If Orchestrator failed to format JSON, fallback to starting with Researcher
-      if (!targetAgentName && loopCount === 1) {
-        targetAgentName = availableAgents.find(a => a.data.role.toLowerCase() === 'researcher')?.data.label || availableAgents[0]?.data.label;
-      }
-
-      // 3. Stop Condition
-      if (!targetAgentName || targetAgentName.toLowerCase() === 'none' || targetAgentName === 'null') {
-        logger.info('[Dynamic Orchestrator] Workflow fully completed (no target agent).');
-        break;
-      }
-
-      const targetAgentNode = availableAgents.find(a => a.data.label.toLowerCase() === targetAgentName!.toLowerCase());
-      if (!targetAgentNode) {
-        logger.warn(`[Dynamic Orchestrator] Output targeted unknown agent: ${targetAgentName}. Stopping.`);
-        break;
-      }
-
-      // 4. Execute Target Agent
-      logger.info(`[Dynamic Orchestrator] Routing to: ${targetAgentNode.data.label}`);
-      if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
 
       const agentResponse = await this.executeAgent(
-        executionId, workflowId, targetAgentNode, 
-        `Please fulfill your task.\n\nORCHESTRATOR DIRECTIVE & PAYLOAD:\n${targetPayload}`, 
+        executionId, workflowId, agentNode,
+        agentPrompt,
         memory, stepLogs
       );
 
-      // 5. Feed agent response back to Orchestrator for the next loop
-      currentPayloadToOrch = agentResponse;
-    }
+      if (isFirstAgent) {
+        workingContent = agentResponse;
+        currentFeedback = '';
+        currentStepIndex++;
+      } else {
+        const reflection = parseAgentReflection(agentResponse);
+        
+        if (reflection.status === 'REJECTED') {
+           logger.info(`[Dynamic Orchestrator] ${agentNode.data.label} REJECTED output. Asking Orchestrator to review...`);
+           
+           const orchReviewPrompt = `--- ORCHESTRATOR OVERSIGHT REQUIRED ---\n\nAgent "${agentNode.data.label}" just REJECTED the output of Agent "${previousAgentNode?.data.label}".\n\nHere is the critique from "${agentNode.data.label}":\n"${reflection.feedback}"\n\nYOUR TASK: As the overall Orchestrator, review this feedback. Write a clear, encouraging, but strict directive addressed to "${previousAgentNode?.data.label}" explaining exactly what they need to fix based on this feedback. Output ONLY your message to them, without any JSON formatting.`;
+           
+           const orchReview = await this.executeAgent(
+             executionId, workflowId, orchestratorNode,
+             orchReviewPrompt,
+             memory, stepLogs
+           );
 
-    if (loopCount >= MAX_LOOPS) {
-      logger.warn('[Dynamic Orchestrator] Max loops reached! Forcing workflow stop.');
+           revisionsCount++;
+           
+           if (revisionsCount >= MAX_REVISIONS) {
+             logger.warn(`[Dynamic Orchestrator] Max revisions (${MAX_REVISIONS}) reached. Force Approving to prevent infinite loop.`);
+             workingContent = agentResponse;
+             currentFeedback = '';
+             currentStepIndex++;
+           } else {
+             // Bounce back with feedback synthesized by Orchestrator
+             currentFeedback = orchReview;
+             currentStepIndex--;
+           }
+        } else {
+           logger.info(`[Dynamic Orchestrator] ${agentNode.data.label} APPROVED output.`);
+           workingContent = reflection.content && reflection.content.trim() ? reflection.content : agentResponse;
+           currentFeedback = '';
+           currentStepIndex++;
+        }
+      }
     }
+    
+    // ── PHASE 3: Final Orchestrator Review ──
+    logger.info(`[Dynamic Orchestrator] Sequence complete. Handing over to Orchestrator for FINAL REVIEW.`);
+    const finalReviewPrompt = `--- FINAL ORCHESTRATOR REVIEW ---\n\nORIGINAL DIRECTIVE:\n${memory.userInput}\n\nFINAL OUTPUT FROM LAST AGENT:\n${workingContent}\n\nYOUR TASK: You are the Orchestrator. The workflow has completed its routing sequence. Please review the final output against the original directive. If it needs final polish, formatting, or a concluding summary, provide it now. \n\nOutput your final response as plain text without any JSON envelope.`;
+
+    const finalResult = await this.executeAgent(
+      executionId, workflowId, orchestratorNode,
+      finalReviewPrompt,
+      memory, stepLogs
+    );
+
+    logger.info(`[Dynamic Orchestrator] Workflow completed successfully.`);
+    return finalResult;
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -235,70 +284,86 @@ export class Orchestrator {
     memory: SharedMemory,
     stepLogs: AgentStepLog[]
   ) {
-    const MAX_FEEDBACK_ROUNDS = 3;
+    const MAX_REVISIONS = 5;
     const executionLevels = this.buildExecutionLevels(nodes, edges);
     // Remove Orchestrator from the main linear sequence so it only acts as a supervisor
     const executionSequence = executionLevels.flat().filter(n => n.id !== orchestratorNode.id);
     
     let workingContent = memory.userInput;
-    let previousNode: WorkflowNode | null = null;
-    let previousAgentContent = memory.userInput;
+    let currentFeedback = '';
 
-    for (const node of executionSequence) {
+    let currentStepIndex = 0;
+    let revisionsCount = 0;
+
+    while (currentStepIndex < executionSequence.length) {
       if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
 
-      logger.info(`[Hybrid] Executing Agent: ${node.data.label}`);
-      
-      const payloadContext = `--- ORIGINAL USER DIRECTIVE ---\n${memory.userInput}\n\n--- CONTENT PRODUCED BY PREVIOUS AGENT (You must process this) ---\n${workingContent}`;
+      const node = executionSequence[currentStepIndex];
+      logger.info(`[Hybrid] Executing Agent at Step ${currentStepIndex}: ${node.data.label}`);
 
-      let agentResponse = await this.executeAgent(
+      // 1. Agent Executes
+      let agentPrompt = `--- ORIGINAL DIRECTIVE ---\n${memory.userInput}\n\n--- WORKING CONTENT ---\n${workingContent}\n\n`;
+      if (currentFeedback) {
+        agentPrompt += `⚠️ MESSAGE FROM ORCHESTRATOR:\n${currentFeedback}\n\nPlease revise your work.\n\n`;
+      } else {
+        agentPrompt += `Please execute your specific role on the Working Content.\n\n`;
+      }
+      agentPrompt += `Output your final result as plain text without any JSON envelope.`;
+
+      const agentResponse = await this.executeAgent(
         executionId, workflowId, node, 
-        `Please execute your specific role.\n\n${payloadContext}`, 
+        agentPrompt, 
         memory, stepLogs
       );
 
-      let parsedAgent = parseAgentOutput(agentResponse);
+      // 2. Orchestrator Evaluates
+      logger.info(`[Hybrid] Orchestrator Evaluating Agent ${node.data.label}...`);
+      if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
 
-      // ── FEEDBACK LOOP TRIGGER ──
-      if (parsedAgent.needs_revision && previousNode) {
-        let round = 0;
-        logger.info(`[Hybrid] 🛑 REVISION TRIGGERED: ${node.data.label} rejected ${previousNode.data.label}'s output!`);
+      const evaluationPrompt = `--- HYBRID SUPERVISOR EVALUATION ---\n\nORIGINAL DIRECTIVE:\n${memory.userInput}\n\nAGENT (${node.data.label}) JUST PRODUCED:\n${agentResponse}\n\nYOUR TASK: You are the strict Orchestrator routing the workflow. Evaluate the Agent's output against the Original Directive.\nIf it is poor, incorrect, or incomplete, REJECT it and provide feedback describing what they must fix.\nIf it is acceptable, APPROVE it to pass down the workflow.\n\nYou MUST respond at the end of your message with exactly this JSON format:\n\`\`\`json\n{\n  "status": "APPROVED" | "REJECTED",\n  "feedback": "Reason for rejection or brief note if approved.",\n  "content": "Your final processed output or revised text if approved (leave empty if rejected)"\n}\n\`\`\``;
 
-        while (round < MAX_FEEDBACK_ROUNDS && parsedAgent.needs_revision) {
-          round++;
-          logger.info(`[Hybrid] Feedback Loop Round ${round}...`);
-          if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
+      const evalResponse = await this.executeAgent(
+        executionId, workflowId, orchestratorNode,
+        evaluationPrompt,
+        memory, stepLogs
+      );
 
-          // 1. Orchestrator Criticizes Previous Node
-          const orchPrompt = `HYBRID SUPERVISOR MODE\n\n--- ORIGINAL GOAL ---\n${memory.userInput}\n\nAgent [${node.data.label}] rejected the work of Agent [${previousNode.data.label}].\n\nCOMPLAINT FROM ${node.data.label}:\n${parsedAgent.final_output || agentResponse}\n\nORIGINAL WORK FROM ${previousNode.data.label}:\n${previousAgentContent}\n\nYOUR TASK: You are the Orchestrator Supervisor. Review the complaint against the ORIGINAL GOAL. Write a harsh, specific criticism and actionable directives for [${previousNode.data.label}] to fix their work. Do not output routing JSON, just the feedback text.`;
-          
-          const orchFeedback = await this.executeAgent(executionId, workflowId, orchestratorNode, orchPrompt, memory, stepLogs);
+      const reflection = parseAgentReflection(evalResponse);
 
-          // 2. Previous Node Redoes Work
-          if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
-          const redoPrompt = `⚠️ YOUR PREVIOUS WORK WAS REJECTED BY ${node.data.label}!\n\n--- ORIGINAL GOAL ---\n${memory.userInput}\n\nCOMPLAINT:\n${parsedAgent.final_output || agentResponse}\n\nDIRECTIVE FROM ORCHESTRATOR SUPERVISOR:\n${orchFeedback}\n\nYOUR TASK: You must completely redo your work based on this feedback, making sure you align perfectly with the ORIGINAL GOAL. Output your standard JSON.`;
-          
-          const redoResponse = await this.executeAgent(executionId, workflowId, previousNode, redoPrompt, memory, stepLogs);
-          const parsedRedo = parseAgentOutput(redoResponse);
-          previousAgentContent = parsedRedo.final_output;
-
-          // 3. Current Node Re-Evaluates
-          if (this.cancelledExecutions.has(executionId)) throw new Error('Execution stopped by user');
-          const reEvalPrompt = `--- ORIGINAL USER DIRECTIVE ---\n${memory.userInput}\n\nAgent [${previousNode.data.label}] has revised their work based on your feedback.\n\nREVISED WORK:\n${parsedRedo.final_output}\n\nYOUR TASK: Re-evaluate this new work according to your role's standards and the ORIGINAL GOAL. If it's good, set "needs_revision": false. If it still fails, set "needs_revision": true and provide a new complaint. Output your standard JSON.`;
-          
-          agentResponse = await this.executeAgent(executionId, workflowId, node, reEvalPrompt, memory, stepLogs);
-          parsedAgent = parseAgentOutput(agentResponse);
-        }
-
-        if (round >= MAX_FEEDBACK_ROUNDS && parsedAgent.needs_revision) {
-          logger.warn(`[Hybrid] Max feedback rounds (${MAX_FEEDBACK_ROUNDS}) reached. Forcing workflow progression.`);
-        }
+      if (reflection.status === 'REJECTED') {
+         logger.info(`[Hybrid] 🛑 Orchestrator REJECTED ${node.data.label}'s output. Forcing rewrite...`);
+         revisionsCount++;
+         
+         if (revisionsCount >= MAX_REVISIONS) {
+           logger.warn(`[Hybrid] Max revisions (${MAX_REVISIONS}) reached. Force advancing.`);
+           workingContent = agentResponse;
+           currentFeedback = '';
+           currentStepIndex++;
+         } else {
+           // Provide Orchestrator feedback and repeat the same index
+           currentFeedback = reflection.feedback || "Your output was inadequate. Please redo.";
+         }
+      } else {
+         logger.info(`[Hybrid] ✅ Orchestrator APPROVED ${node.data.label}'s output.`);
+         workingContent = reflection.content && reflection.content.trim() ? reflection.content : agentResponse;
+         currentFeedback = '';
+         revisionsCount = 0; // Reset for the next agent
+         currentStepIndex++;
       }
-
-      workingContent = parsedAgent.final_output;
-      previousAgentContent = parsedAgent.final_output;
-      previousNode = node;
     }
+
+    // ── PHASE 3: Final Orchestrator Review ──
+    logger.info(`[Hybrid] Sequence complete. Handing over to Orchestrator for FINAL REVIEW.`);
+    const finalReviewPrompt = `--- FINAL ORCHESTRATOR REVIEW ---\n\nORIGINAL DIRECTIVE:\n${memory.userInput}\n\nFINAL OUTPUT FROM LAST AGENT:\n${workingContent}\n\nYOUR TASK: You are the Orchestrator. The workflow has completed its routing sequence. Please review the final output against the original directive. If it needs final polish, formatting, or a concluding summary, provide it now. \n\nOutput your final response as plain text without any JSON envelope.`;
+
+    const finalResult = await this.executeAgent(
+      executionId, workflowId, orchestratorNode,
+      finalReviewPrompt,
+      memory, stepLogs
+    );
+
+    logger.info(`[Hybrid] Workflow completed successfully.`);
+    return finalResult;
   }
 
   // ══════════════════════════════════════════════════════════════

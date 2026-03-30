@@ -19,13 +19,22 @@ export default function ExecutionPanel() {
   } = useWorkflowStore();
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  // Detect manual user scrolling
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    // Tolerance of 10px to consider it 'at bottom'
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
+    setAutoScroll(isAtBottom);
+  };
 
   // Auto-scroll to bottom when streaming
   useEffect(() => {
-    if (scrollRef.current && isRunning) {
+    if (scrollRef.current && isRunning && autoScroll) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [agentOutputs, executionSteps, isRunning]);
+  }, [agentOutputs, executionSteps, isRunning, autoScroll]);
 
   if (!showExecution) return null;
 
@@ -122,7 +131,7 @@ export default function ExecutionPanel() {
       )}
 
       {/* ── Content ─────────────────────────────────────────────── */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto relative">
         {activeTab === 'logs' ? (
           <LogsView
             steps={executionSteps}
