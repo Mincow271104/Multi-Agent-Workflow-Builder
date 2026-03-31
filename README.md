@@ -45,6 +45,8 @@ Người dùng được tự do mở rộng giới hạn của hệ thống bằ
 ### 🪄 AI System Prompt Generator (Trợ lý Sinh Prompt Tự Động)
 Để giải quyết khó khăn của việc viết System prompt mô tả tính cách cho các Agent mới, nền tảng tích hợp một "Trợ lý hỗ trợ lập trình Prompt". Bạn chỉ cần gõ đúng một chức danh ngắn gọn (ví dụ: *Chuyên gia SEO thực chiến*), hệ thống sẽ tự động tổng hợp ngược lại một bản System Prompt chuyên nghiệp, cấu trúc ràng buộc chuẩn mực và áp liền vào Agent.
 
+![Custom Agent Configuration & Prompt Generator](1.png)
+
 ### 🖐️ Hand-Tracking Auxiliary Control (Điều Khiển Bằng Cử Chỉ Tay 3D)
 Nhằm mang lại trải nghiệm không gian đột phá, nền tảng tích hợp bộ tracking MediaPipe Vision. Máy ảnh sẽ đọc vị trí các đốt ngón tay theo thời gian thực để tương tác với canvas đồ thị mà không cần chạm chuột:
 - ☝️ **Point (Chỉ duy nhất Ngón Trỏ ra phía trước):** Thay thế chuột để di chuyển con trỏ ảo trên màn hình. Giữ nguyên vị trí đó (Dwell) khoảng 3 giây để kích hoạt **Click**.
