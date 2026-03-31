@@ -19,13 +19,13 @@ The system features 3 distinct Pipeline modes, catering to everything from stric
 The traditional execution mode. Users manually draw mind maps, directly wiring Agent A to Agent B. The system strictly adheres to the Topological Sort structure, passing the output data of the previous generation as the input to the next.  
 🔹 *Characteristics:* 100% data flow control, ideal for standardized, fixed business processes.
 
-![Waterfall Mode](WATER%20FALL%20MODE.png)
+![Waterfall Mode](assets/WATER%20FALL%20MODE.png)
 
 ### 2. Dynamic Hybrid Mode (Fully Autonomous Orchestration)
 Maximum autonomy. The system appoints an AI to act as the **Chief Orchestrator**. The Orchestrator analyzes the user's "Original Directive", scans the available AI Agents on the canvas, and autonomously reasons out an execution loop to generate a JSON Execution Plan.  
 🔹 *Characteristics:* Collaborative teamwork without any manual wiring. The user only needs to provide the final command.
 
-![Dynamic Hybrid Mode](DYNAMIC%20HYBRID%20MODE.png)
+![Dynamic Hybrid Mode](assets/DYNAMIC%20HYBRID%20MODE.png)
 
 ### 3. Hybrid Supervisor Mode (Dynamic Chained Routing)
 The perfect fusion of an **AI Dynamic Planner** and **Human Force Constraints**.
@@ -33,7 +33,7 @@ The perfect fusion of an **AI Dynamic Planner** and **Human Force Constraints**.
 - However, when the execution hits an Agent that the user has intentionally *hard-wired* (e.g., `Writer` is strictly wired to `Critic`), the system activates the **Force-Pull Chain Law**. It immediately pulls all adjacent Agents to run as a cluster (ping-pong feedback loops) before returning to the free assignment flow.
 🔹 *Characteristics:* A flawless balance between AI's creative freedom and strict human supervisory loops.
 
-![Hybrid Supervisor Mode](HYBRID%20SUPERVISOR%20MODE%20%28DYNAMIC%20CHAINED%20ROUTING%29.png)
+![Hybrid Supervisor Mode](assets/HYBRID%20SUPERVISOR%20MODE%20%28DYNAMIC%20CHAINED%20ROUTING%29.png)
 
 ---
 
@@ -45,7 +45,7 @@ Users have the freedom to expand the system's limits by creating new AI Agents a
 ### 🪄 AI System Prompt Generator
 To resolve the difficulty of writing psychological constraints and persona System Prompts for new Agents, the platform integrates a "Prompt Engineering Assistant". You simply type a brief job title (e.g., *Practical SEO Expert*), and the system automatically synthesizes a professional, structurally standardized System Prompt and applies it directly to the Agent.
 
-![Custom Agent Configuration & Prompt Generator](1.png)
+![Custom Agent Configuration & Prompt Generator](assets/1.png)
 
 ### 🖐️ Hand-Tracking Auxiliary Control (3D Gesture UI)
 To deliver a breakthrough spatial computing experience, the platform integrates MediaPipe Vision tracking. The camera reads the positions of finger joints in real-time, allowing users to interact with the graph canvas absolutely mouse-free:
