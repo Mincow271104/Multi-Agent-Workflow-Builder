@@ -53,9 +53,9 @@ interface WorkflowState {
 
   // ── Execution actions ────────────────────────────────────────
   startExecution: (executionId: string) => void;
-  onAgentStarted: (data: { nodeId: string; agentName: string; role: string; provider: string; model: string }) => void;
-  onAgentStream: (nodeId: string, chunk: string) => void;
-  onAgentFinished: (data: { nodeId: string; agentName: string; role: string; output: string; durationMs: number }) => void;
+  onAgentStarted: (data: { nodeId: string; originalNodeId?: string; agentName: string; role: string; provider: string; model: string }) => void;
+  onAgentStream: (nodeId: string, chunk: string, originalNodeId?: string) => void;
+  onAgentFinished: (data: { nodeId: string; originalNodeId?: string; agentName: string; role: string; output: string; durationMs: number }) => void;
   onExecutionCompleted: (result: Record<string, unknown>, logs: AgentStepLog[]) => void;
   onExecutionError: (error: string) => void;
   resetExecution: () => void;
@@ -227,7 +227,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       })),
     })),
 
-  onAgentStarted: ({ nodeId, agentName, role, provider, model }) =>
+  onAgentStarted: ({ nodeId, originalNodeId, agentName, role, provider, model }) =>
     set((s) => ({
       currentAgentId: nodeId,
       agentOutputs: { ...s.agentOutputs, [nodeId]: '' },
@@ -245,11 +245,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         },
       ],
       nodes: s.nodes.map((n) =>
-        n.id === nodeId ? { ...n, data: { ...n.data, status: 'running' as const } } : n,
+        n.id === (originalNodeId || nodeId) ? { ...n, data: { ...n.data, status: 'running' as const } } : n,
       ),
     })),
 
-  onAgentStream: (nodeId, chunk) =>
+  onAgentStream: (nodeId, chunk, originalNodeId) =>
     set((s) => {
       const current = s.agentOutputs[nodeId] || '';
       const newOutput = current + chunk;
@@ -266,12 +266,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         agentOutputs: { ...s.agentOutputs, [nodeId]: newOutput },
         executionSteps: newSteps,
         nodes: s.nodes.map((n) =>
-          n.id === nodeId ? { ...n, data: { ...n.data, status: 'streaming' as const } } : n,
+          n.id === (originalNodeId || nodeId) ? { ...n, data: { ...n.data, status: 'streaming' as const } } : n,
         ),
       };
     }),
 
-  onAgentFinished: ({ nodeId, agentName, role, output, durationMs }) =>
+  onAgentFinished: ({ nodeId, originalNodeId, agentName, role, output, durationMs }) =>
     set((s) => {
       const newSteps = [...s.executionSteps];
       for (let i = newSteps.length - 1; i >= 0; i--) {
@@ -286,7 +286,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         agentOutputs: { ...s.agentOutputs, [nodeId]: output },
         executionSteps: newSteps,
         nodes: s.nodes.map((n) =>
-          n.id === nodeId
+          n.id === (originalNodeId || nodeId)
             ? { ...n, data: { ...n.data, status: 'completed' as const, output } }
             : n,
         ),

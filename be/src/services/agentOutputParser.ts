@@ -147,36 +147,60 @@ export interface AgentReflectionOutput {
 
 export function parseAgentReflection(output: string): AgentReflectionOutput {
   const fallback: AgentReflectionOutput = {
-    status: 'APPROVED',
-    feedback: '',
-    content: output
+    status: 'REJECTED',
+    feedback: `[SYSTEM ERROR] Agent failed to formulate a structured JSON evaluation. Please evaluate again and strictly follow the given JSON format. Raw Text Output: ${output}`,
+    content: ''
   };
 
   try {
-    const codeBlockRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/i;
-    const match = output.match(codeBlockRegex);
-    let rawJson = match && match[1] ? match[1] : output;
+    // 1. Extract all code blocks that look like JSON
+    const codeBlockRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/ig;
+    let match;
+    const jsonBlocks = [];
+    while ((match = codeBlockRegex.exec(output)) !== null) {
+      jsonBlocks.push(match[1]);
+    }
     
-    if (!match) {
-       const firstBrace = output.indexOf('{');
-       const lastBrace = output.lastIndexOf('}');
-       if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-         rawJson = output.substring(firstBrace, lastBrace + 1);
-       } else {
-         return fallback; // No JSON found, assume raw output
+    // Parse from the LAST block backwards (since the evaluation JSON is strictly requested at the END)
+    for (let i = jsonBlocks.length - 1; i >= 0; i--) {
+       try {
+         const parsed = JSON.parse(jsonBlocks[i]);
+         if (parsed && typeof parsed.status === 'string') {
+           return {
+             status: parsed.status === 'REJECTED' ? 'REJECTED' : 'APPROVED',
+             feedback: parsed.feedback || '',
+             content: parsed.content || output
+           };
+         }
+       } catch (e) {
+         // Skip invalid JSON blocks
        }
     }
-    
-    const parsed = JSON.parse(rawJson);
-    if (parsed && parsed.status) {
-      return {
-        status: parsed.status === 'REJECTED' ? 'REJECTED' : 'APPROVED',
-        feedback: parsed.feedback || '',
-        content: parsed.content || output
-      };
+
+    // 2. If no valid code block, try to find a raw JSON object string
+    const lastBraceIndex = output.lastIndexOf('}');
+    if (lastBraceIndex !== -1) {
+       const statusMatchIndex = output.lastIndexOf('{"status"');
+       const startIdx = statusMatchIndex !== -1 ? statusMatchIndex : output.indexOf('{');
+       
+       if (startIdx !== -1 && lastBraceIndex > startIdx) {
+          const rawJson = output.substring(startIdx, lastBraceIndex + 1);
+          try {
+             const parsed = JSON.parse(rawJson);
+             if (parsed && typeof parsed.status === 'string') {
+                return {
+                  status: parsed.status === 'REJECTED' ? 'REJECTED' : 'APPROVED',
+                  feedback: parsed.feedback || '',
+                  content: parsed.content || output
+                };
+             }
+          } catch (e) {
+             // Let it fall to fallback
+          }
+       }
     }
   } catch (err) {
-    logger.warn('[Parser] Failed to parse Agent Reflection JSON. Falling back to raw content.');
+    logger.warn('[Parser] Fatal error parsing Agent Reflection JSON. Falling back to REJECTED.', err);
   }
   
   return fallback;

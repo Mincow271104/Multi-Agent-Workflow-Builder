@@ -68,6 +68,7 @@ export default function WorkflowPage() {
       console.log('[Exec] Agent started:', data.agentName);
       onAgentStarted({
         nodeId: data.nodeId || data.agentId || `agent_${Date.now()}`,
+        originalNodeId: data.originalNodeId || data.nodeId,
         agentName: data.agentName || data.name || 'Agent',
         role: data.role || 'agent',
         provider: data.provider || 'ollama',
@@ -77,13 +78,14 @@ export default function WorkflowPage() {
 
     socket.on('agentStream', (data) => {
       const nodeId = data.nodeId || data.agentId || '';
-      onAgentStream(nodeId, data.chunk || data.content || '');
+      onAgentStream(nodeId, data.chunk || data.content || '', data.originalNodeId);
     });
 
     socket.on('agentFinished', (data) => {
       console.log('[Exec] Agent finished:', data.agentName);
       onAgentFinished({
         nodeId: data.nodeId || data.agentId || '',
+        originalNodeId: data.originalNodeId || data.nodeId,
         agentName: data.agentName || data.name || 'Agent',
         role: data.role || 'agent',
         output: data.output || data.fullOutput || '',
