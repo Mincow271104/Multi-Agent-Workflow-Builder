@@ -177,11 +177,10 @@ export function parseAgentReflection(output: string): AgentReflectionOutput {
        }
     }
 
-    // 2. If no valid code block, try to find a raw JSON object string
+    // 2. If no valid code block, or JSON parse failed, try to find a raw JSON object string
     const lastBraceIndex = output.lastIndexOf('}');
     if (lastBraceIndex !== -1) {
-       const statusMatchIndex = output.lastIndexOf('{"status"');
-       const startIdx = statusMatchIndex !== -1 ? statusMatchIndex : output.indexOf('{');
+       const startIdx = output.indexOf('{');
        
        if (startIdx !== -1 && lastBraceIndex > startIdx) {
           const rawJson = output.substring(startIdx, lastBraceIndex + 1);
@@ -195,10 +194,28 @@ export function parseAgentReflection(output: string): AgentReflectionOutput {
                 };
              }
           } catch (e) {
-             // Let it fall to fallback
+             // Let it fall to regex fallback
           }
        }
     }
+
+    // 3. REGEX FALLBACK: LLMs often generate invalid JSON with unescaped newlines in "content".
+    // If JSON parsing completely fails, we use Regex to extract the fields aggressively.
+    const statusMatch = output.match(/"status"\s*:\s*"(APPROVED|REJECTED)"/i);
+    const feedbackMatch = output.match(/"feedback"\s*:\s*"([^"]*)"/i);
+    
+    // For content, match from "content": " until the last quote before the final brace
+    const contentRegex = /"content"\s*:\s*"([\s\S]*?)"\s*\}/i;
+    const contentMatch = output.match(contentRegex);
+
+    if (statusMatch) {
+      return {
+        status: statusMatch[1].toUpperCase() === 'REJECTED' ? 'REJECTED' : 'APPROVED',
+        feedback: feedbackMatch ? feedbackMatch[1] : '',
+        content: contentMatch ? contentMatch[1] : output
+      };
+    }
+
   } catch (err) {
     logger.warn('[Parser] Fatal error parsing Agent Reflection JSON. Falling back to REJECTED.', err);
   }

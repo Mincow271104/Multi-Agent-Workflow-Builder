@@ -182,6 +182,7 @@ export class Orchestrator {
     let currentStepIndex = 0;
     const MAX_REVISIONS = 5;
     let revisionsCount = 0;
+    let globalRunCounter = 0; // Monotonic counter for unique UI instance IDs
     
     let workingContent = memory.userInput;
     let currentFeedback = '';
@@ -197,26 +198,28 @@ export class Orchestrator {
 
       let agentPrompt = '';
       if (isFirstAgent) {
-        agentPrompt = `--- YOUR STRICT TASK SCOPING ---\n${taskScoping || 'Please fulfill your role based on the directive.'}\n\n(Background Context - Original User Directive: ${memory.userInput})\n\n`;
+        agentPrompt = `--- YOUR STRICT TASK SCOPING ---\n${taskScoping || 'Please fulfill your role based on the directive.'}\n\n`;
         if (currentFeedback) {
            agentPrompt += `⚠️ MESSAGE FROM ORCHESTRATOR:\n${currentFeedback}\n\nPlease revise your work accordingly.`;
         }
-        agentPrompt += `\n\nSince you are the first agent, output ONLY your final result as plain text without any JSON envelope. YOU MUST OBEY YOUR STRICT TASK SCOPING ABOVE. Do NOT attempt to fulfill the entire Original User Directive.\n\nCRITICAL LANGUAGE RULE: Your output MUST be in English unless your task explicitly commands otherwise.`;
+        agentPrompt += `\n\nSince you are the first agent, output ONLY your final result as plain text without any JSON envelope. YOU MUST OBEY YOUR STRICT TASK SCOPING ABOVE. Do NOT attempt to fulfill the entire Original User Directive.\nCRITICAL: You MUST NOT perform tasks explicitly assigned to OTHER agents (e.g., do NOT translate if a Translator agent exists, do NOT do SEO if an SEO agent exists).\n\nCRITICAL LANGUAGE RULE: Your output MUST be in English unless your task explicitly commands otherwise.`;
       } else {
-        agentPrompt = `--- YOUR STRICT TASK SCOPING ---\n${taskScoping || 'Please perform your role on the previous output.'}\n\n(Background Context - Original User Directive: ${memory.userInput})\n\n`;
+        agentPrompt = `--- YOUR STRICT TASK SCOPING ---\n${taskScoping || 'Please perform your role on the previous output.'}\n\n`;
         agentPrompt += `--- OUTPUT FROM PREVIOUS AGENT (${previousAgentNode?.data.label}) ---\n${workingContent}\n\n`;
         
         if (currentFeedback) {
            agentPrompt += `⚠️ MESSAGE FROM ORCHESTRATOR:\n${currentFeedback}\n\nPlease revise your work.\n\n`;
         }
 
-        agentPrompt += `YOUR TASK:\nEvaluate the previous agent's output. If it severely violates the Original Directive, REJECT it and provide feedback. If it is acceptable, perform your specific role on it and APPROVE it.\n\nWARNING: YOU MUST OBEY YOUR STRICT TASK SCOPING ABOVE! Do NOT attempt to fulfill downstream steps of the Original Directive. Leave them for the next agents.\n\nCRITICAL LANGUAGE RULE: Your internal thinking and JSON output MUST be in English. ONLY translate the final content if your taskScoping explicitly instructs you to do so.\n\nYou MUST respond at the end of your message with exactly this JSON format:\n\`\`\`json\n{\n  "status": "APPROVED" | "REJECTED",\n  "feedback": "Reason for rejection or brief note if approved.",\n  "content": "The full, complete content that the NEXT agent will need. Do NOT leave this empty unless you are rejecting. You must include the full valid text here."\n}\n\`\`\``;
+        agentPrompt += `YOUR PRIMARY JOB: You MUST perform your STRICT TASK SCOPING on the content above. Read your task scoping carefully and TRANSFORM the content accordingly. Simply copy-pasting the previous content without modification is NOT acceptable — you will fail your task if you do so.\n\nAfter completing your transformation, set your status:\n- APPROVED: The previous content was usable AND your transformation is complete.\n- REJECTED: The previous content is fundamentally broken and cannot be used. Provide specific feedback.\n\nRULES:\n1. You MUST NOT perform tasks assigned to OTHER agents (e.g., do NOT translate if a Translator agent exists, do NOT do SEO if an SEO agent exists). Only do YOUR scoped task.\n2. Do NOT critique missing elements scoped for LATER agents (e.g., missing emojis, missing translation). Only judge YOUR scope.\n3. Your internal thinking MUST be in English. ONLY translate content if your taskScoping explicitly commands it.\n\nYou MUST respond at the end of your message with exactly this JSON format:\n\`\`\`json\n{\n  "status": "APPROVED" | "REJECTED",\n  "feedback": "Brief note on what you did or why you rejected.",\n  "content": "The TRANSFORMED content after you performed your task. This MUST be different from the input if your task requires modification. Do NOT leave empty."\n}\n\`\`\``;
       }
+
+      const stepInstanceId = `${agentNode.id}-inst-${globalRunCounter++}`;
 
       const agentResponse = await this.executeAgent(
         executionId, workflowId, agentNode,
         agentPrompt,
-        memory, stepLogs
+        memory, stepLogs, stepInstanceId
       );
 
       if (isFirstAgent) {
@@ -231,10 +234,11 @@ export class Orchestrator {
            
            const orchReviewPrompt = `--- ORCHESTRATOR OVERSIGHT REQUIRED ---\n\nAgent "${agentNode.data.label}" just REJECTED the output of Agent "${previousAgentNode?.data.label}".\n\nHere is the critique from "${agentNode.data.label}":\n"${reflection.feedback}"\n\nYOUR TASK: As the overall Orchestrator, review this feedback. Write a clear, encouraging, but strict directive addressed to "${previousAgentNode?.data.label}" explaining exactly what they need to fix based on this feedback. Output ONLY your message to them, without any JSON formatting.`;
            
+           const orchReviewInstanceId = `${orchestratorNode.id}-review-${globalRunCounter++}`;
            const orchReview = await this.executeAgent(
              executionId, workflowId, orchestratorNode,
              orchReviewPrompt,
-             memory, stepLogs
+             memory, stepLogs, orchReviewInstanceId
            );
 
            revisionsCount++;
@@ -243,6 +247,7 @@ export class Orchestrator {
              logger.warn(`[Dynamic Orchestrator] Max revisions (${MAX_REVISIONS}) reached. Force Approving to prevent infinite loop.`);
              workingContent = agentResponse;
              currentFeedback = '';
+             revisionsCount = 0; // VITAL: Reset so next agents get their own 5 tries
              currentStepIndex++;
            } else {
              // Bounce back with feedback synthesized by Orchestrator
@@ -251,8 +256,14 @@ export class Orchestrator {
            }
         } else {
            logger.info(`[Dynamic Orchestrator] ${agentNode.data.label} APPROVED output.`);
-           workingContent = reflection.content && reflection.content.trim() ? reflection.content : agentResponse;
+           if (reflection.content && reflection.content.trim()) {
+             workingContent = reflection.content;
+           } else {
+             // Safety net: agent left content empty despite instructions. Retain previous workingContent.
+             logger.warn(`[Dynamic Orchestrator] ${agentNode.data.label} returned empty content. Retaining previous workingContent as safety fallback.`);
+           }
            currentFeedback = '';
+           revisionsCount = 0; // Reset for next agent
            currentStepIndex++;
         }
       }
@@ -260,12 +271,13 @@ export class Orchestrator {
     
     // ── PHASE 3: Final Orchestrator Review ──
     logger.info(`[Dynamic Orchestrator] Sequence complete. Handing over to Orchestrator for FINAL REVIEW.`);
-    const finalReviewPrompt = `--- FINAL ORCHESTRATOR REVIEW ---\n\nORIGINAL DIRECTIVE:\n${memory.userInput}\n\nFINAL OUTPUT FROM LAST AGENT:\n${workingContent}\n\nYOUR TASK: You are the Orchestrator. The workflow has completed its routing sequence. Please review the final output against the original directive. If it needs final polish, formatting, or a concluding summary, provide it now. \n\nOutput your final response as plain text without any JSON envelope.`;
+    const finalReviewPrompt = `--- FINAL ORCHESTRATOR REVIEW ---\n\nORIGINAL DIRECTIVE:\n${memory.userInput}\n\nFINAL OUTPUT FROM LAST AGENT:\n${workingContent}\n\nYOUR TASK: You are the Orchestrator. The workflow has completed its routing sequence. Please review the final output against the original directive. If it needs final polish, formatting, or a concluding summary, provide it now.\n\nCRITICAL RULES:\n1. DO NOT TRANSLATE. Output the content in the EXACT SAME LANGUAGE as the FINAL OUTPUT above.\n2. DO NOT include any headers, status blocks, or conversational padding such as "=== ORCHESTRATOR STATUS ===", "Message to user:", "Current stage:", "Next action:", or "=== END STATUS ===".\n3. Output ONLY the raw final content as plain text. No JSON envelope.`;
 
+    const finalOrchInstanceId = `${orchestratorNode.id}-final-${globalRunCounter++}`;
     const finalResult = await this.executeAgent(
       executionId, workflowId, orchestratorNode,
       finalReviewPrompt,
-      memory, stepLogs
+      memory, stepLogs, finalOrchInstanceId
     );
 
     logger.info(`[Dynamic Orchestrator] Workflow completed successfully.`);
@@ -411,12 +423,13 @@ export class Orchestrator {
     currentTaskInput: string,
     memory: SharedMemory,
     stepLogs: AgentStepLog[],
+    stepInstanceId?: string
   ): Promise<string> {
     const startTime = Date.now();
     const { data } = node;
 
     const stepLog: AgentStepLog = {
-      nodeId: node.id,
+      nodeId: stepInstanceId || node.id,
       agentName: data.label,
       role: data.role,
       provider: data.provider,
@@ -429,7 +442,10 @@ export class Orchestrator {
 
     try {
       const messages: ChatMessage[] = [];
-      const systemPrompt = data.systemPrompt || `You are a ${data.role} agent.\n\nReturn JSON strictly.`;
+      // Strip conflicting OUTPUT FORMAT from system prompt (injected by auto-gen).
+      // The orchestrator's dynamic prompt already provides the correct format instructions.
+      const rawPrompt = data.systemPrompt || `You are a ${data.role} agent.`;
+      const systemPrompt = rawPrompt.replace(/OUTPUT FORMAT:[\s\S]*/i, '').trim();
       
       messages.push({ role: 'system', content: systemPrompt });
       messages.push({ role: 'user', content: currentTaskInput });
@@ -440,7 +456,8 @@ export class Orchestrator {
 
       this.io.to(`workflow:${workflowId}`).emit('agentStarted', {
         executionId,
-        nodeId: node.id,
+        nodeId: stepInstanceId || node.id,
+        originalNodeId: node.id,
         agentName: data.label,
         role: data.role,
         provider: data.provider,
@@ -453,7 +470,8 @@ export class Orchestrator {
       let fullOutput = memory.language === 'vi' ? 'Đang tải model (tốn 1-2 phút) và suy nghĩ...\n\n' : 'Loading model and thinking deeply...\n\n';
       this.io.to(`workflow:${workflowId}`).emit('agentStream', {
         executionId,
-        nodeId: node.id,
+        nodeId: stepInstanceId || node.id,
+        originalNodeId: node.id,
         agentName: data.label,
         chunk: fullOutput,
         fullOutput,
@@ -485,7 +503,8 @@ export class Orchestrator {
 
         this.io.to(`workflow:${workflowId}`).emit('agentStream', {
           executionId,
-          nodeId: node.id,
+          nodeId: stepInstanceId || node.id,
+          originalNodeId: node.id,
           agentName: data.label,
           chunk,
           fullOutput,
@@ -493,9 +512,7 @@ export class Orchestrator {
         });
       }
 
-      memory.agentOutputs[node.id] = fullOutput;
-      memory.conversationHistory.push({ role: 'user', content: `[${data.label}] executed task.` });
-      memory.conversationHistory.push({ role: 'assistant', content: fullOutput });
+      memory.agentOutputs[stepInstanceId || node.id] = fullOutput;
 
       const durationMs = Date.now() - startTime;
       stepLog.status = 'completed';
@@ -506,7 +523,8 @@ export class Orchestrator {
 
       this.io.to(`workflow:${workflowId}`).emit('agentFinished', {
         executionId,
-        nodeId: node.id,
+        nodeId: stepInstanceId || node.id,
+        originalNodeId: node.id,
         agentName: data.label,
         role: data.role,
         output: fullOutput,
@@ -528,7 +546,8 @@ export class Orchestrator {
 
       this.io.to(`workflow:${workflowId}`).emit('executionError', {
         executionId,
-        nodeId: node.id,
+        nodeId: stepInstanceId || node.id,
+        originalNodeId: node.id,
         error: errorMessage,
       });
 
